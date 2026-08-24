@@ -1,6 +1,6 @@
 ---
 name: pipeline-agent
-description: Runs one day of pipeline generation end to end, for one tenant, without sending anything. Reads config/tenant.yaml, sweeps every enabled candidate source (post engagers, stalled signups, replies that never got followed up, website visitors, partner-network paths, and cold target accounts) in priority order, dedupes and suppresses, researches and qualifies each person, drafts per-play messaging, creates approval-gated actions in the outreach platform assigned to the correct human sender, posts one batch of review cards to the approval hub, and writes a ledger plus a run report. Use it for the scheduled daily run, for a supervised dry run before turning the schedule on, or when someone asks to "work today's pipeline", "find and draft outreach", or "run the SDR loop". Every prospect-facing message it produces waits for a human approval; it never sends.
+description: Runs one day of pipeline generation end to end, for one tenant, without sending anything. Reads config/tenant.yaml, sweeps every enabled candidate source (post engagers, stalled signups, replies that never got followed up, website visitors, partner-network paths, and cold target accounts) in priority order, dedupes and suppresses, researches and qualifies each person, drafts per-play messaging, creates approval-gated actions in the outreach platform assigned to the correct human sender, posts one summary digest, and writes a ledger plus a run report. Use it for the scheduled daily run, for a supervised dry run before turning the schedule on, or when someone asks to "work today's pipeline", "find and draft outreach", or "run the SDR loop". Every prospect-facing message it produces waits for a human approval; it never sends.
 ---
 
 # Pipeline agent (orchestrator)
@@ -58,8 +58,8 @@ The keys this skill depends on most:
    - `supervised` — use `caps.supervised_run_cap` as the global ceiling, narrate
      each decision, and show the drafts in chat for a verbal OK before routing
      them. One OK per run is enough.
-   - `daily` — `caps.max_actions_per_day` is the hard ceiling and
-     `caps.min_actions_per_day` is the target.
+   - `daily` — `caps.max_per_day` is the hard ceiling and
+     `caps.min_per_day` is the target.
 2. Load the ledger at `state.ledger` — the worked-contact history and the
    per-bucket watermarks. A missing file means this is the first run; create it.
 3. Load `state.lessons` if it exists. Accumulated corrections from the humans
@@ -78,15 +78,16 @@ take the thread.
 
 ### 2. Apply pending approval decisions
 
-Read the decisions the approval hub has recorded since the last-applied
-watermark (track the watermark in the ledger). Apply each one:
+Read the decisions recorded in the outreach platform's task queue since the
+last-applied watermark (track the watermark in the ledger). A task that a human
+approved, edited, or skipped is a decision. Apply each one:
 
 - **approved** — if the human edited the copy, write the edit back to the queued
   task first, then complete it.
 - **denied** — skip the task and ledger the contact as declined, respecting
   `dedupe.rework_cooldown_days`.
 - **feedback** — redraft that contact THIS run, using the feedback verbatim as a
-  hard constraint, and route the new draft back through the hub.
+  hard constraint, and create the replacement approval task.
 
 Collapse to the newest decision per contact before applying anything. A
 superseded card's approval must never double-enroll someone.
@@ -98,16 +99,16 @@ to `state.lessons` with an example. Situational corrections (wrong company fact,
 wrong person) do NOT become lessons. Never delete a lesson; supersede it with a
 newer dated entry.
 
-If the approval hub is unreachable, that is a reported blocker, not a licence to
-switch to some other channel. The platform task queue still holds every
-approval. Finish the run and say the mirror did not fire.
+If the platform's queue cannot be read, stop and report it as a blocker rather
+than drafting on top of decisions you could not see — that is how someone gets
+contacted twice. Never switch to another channel to compensate.
 
 ### 3. Sweep the enabled buckets
 
 For each bucket where `enabled: true`, in `priority` order, collect candidates
 that are NEW since that bucket's watermark in the ledger. Source types:
 
-- `platform.social_engagement` — pull engagers for each active monitored
+- `outreach.social_engagement` — pull engagers for each active monitored
   profile. **The per-profile engager reporting layer is the flaky one.** When it
   errors or returns zero, fall back to the platform's signal/enrollment feed
   filtered to engagement signal types over the last 24h (48h after a weekend
@@ -142,7 +143,7 @@ the others.
    - Check the CRM customer signals named in `suppression` (a product-usage
      property indicating an active account, a paid plan property, an open deal,
      a membership in the exclusion list).
-   - Hard-block `customer_domains` by **domain**, matched against both the email
+   - Hard-block `excluded_domains` by **domain**, matched against both the email
      domain and the company/profile domain. Display names drift; domains do not.
      A candidate that arrived from a live signal feed may have no CRM record at
      all, so membership-based exclusion never fires for them — the domain block
@@ -154,8 +155,8 @@ the others.
    closest-to-value first; unanswered replies run positive-and-specific first,
    longest gap first; relationship buckets run strongest path first.
 5. **Cut to the caps** — work buckets in priority order, each limited by its
-   `daily_cap`, and stop everything at `caps.max_actions_per_day`. Count every
-   action written, across every owner when `caps.count_all_owners` is true, and
+   `daily_cap`, and stop everything at `caps.max_per_day`. Count every
+   action written, across every owner when `caps.count_delegated_owners` is true, and
    stop mid-bucket if the ceiling lands there.
 
 ### 5. Work each contact
@@ -248,16 +249,22 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
 
 1. Write `state/runs/<run_id>.json`. Per bucket: candidates seen, qualified,
    worked, skipped with reasons, credits spent. Plus replies found, decisions
-   applied, `min_actions_per_day`, `max_actions_per_day`, `drafted_count`, the
+   applied, `min_per_day`, `max_per_day`, `drafted_count`, the
    owner split, and the relationship-path detail for path-based buckets. This
    file is the QA and costing dataset. Never skip it.
-2. **Post ONE batch to the approval hub.** Resolve the hub URL in this order:
-   env `HUB_URL`, then `approval_channels.public_base_url`, then the local
-   default. Health-check it first. POST the whole day's batch **once** as
-   `{ run_id, tenant, plans: [...] }`. The hub reads `approval_channels` from the
-   tenant config and fans out to the enabled surfaces itself — do not send mail
-   or create CRM tasks yourself, and do not post cards one at a time.
-3. Each plan carries the draft fields plus:
+2. **The approval surface is the outreach platform's task queue.** You have
+   already created the approval-gated tasks there; that queue is the source of
+   truth and the only place a human approves anything. There is no approval
+   service in this repo to post to, and this run opens no listener — see
+   `docs/security.md`.
+
+   If `approval_channels.slack` is true and a bot token is present, post ONE
+   digest message per run summarising the day, with a link to the queue. That
+   message is **one-way**: it is a notification, not an approval surface, and
+   nothing reads a reply to it. Post once per run, never one card at a time.
+   If Slack is unavailable, the run still succeeded — say the digest did not
+   fire and carry on, because every approval is already safe in the queue.
+3. Each digest entry carries the draft fields plus:
    - `signal` — the reason, in one human sentence. This is the SIGNAL, never the
      plumbing. "Started as VP Sales six weeks ago" is a signal. "On approve,
      enrolls via flow X" is plumbing and belongs in the ledger.
@@ -267,7 +274,7 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
    - `task_ids` — the platform tasks this plan maps to. **Required** for
      prospect-facing outreach so one-click approval can complete them. An empty
      array is acceptable only for a blocker note.
-   - `owner` / `channel_id` from `approval_routing`, and the prospect's avatar
+   - `owner` / `slack_channel` from `approval_routing`, and the prospect's avatar
      URL when the source row carried one.
 4. Post a short summary line: replies found, cards posted, combined total plus
    the owner split, credits spent, and any shortfall with its per-bucket reasons.
@@ -278,7 +285,7 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
 
 - **Draft and approve, everywhere.** No step may create an auto-sending action.
   If a flow or action would send without an approval, do not create it.
-- **The floor is a target, not a quota.** `caps.min_actions_per_day` says how
+- **The floor is a target, not a quota.** `caps.min_per_day` says how
   many good actions a healthy day produces. It is not a licence to manufacture
   reasons. Sweep the warm and relationship buckets in priority order first, then
   fill from the cold target-account bucket. If the day still ends short, report
@@ -314,7 +321,8 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
   dynamic actions, the approval task queue.
 - CRM API — list membership, contact and company properties, activity timeline.
 - Web search — free signal research.
-- Approval hub — `HUB_URL`, the batch `/plans` endpoint, card fan-out.
+- Slack — optional, outbound only, one digest per run. This run opens no port and
+  receives nothing; approvals live in the platform's task queue.
 - Optional third-party research APIs (ad libraries, post-reaction lookups) keyed
   by env vars. These are optional by design: several such providers only cover a
   fraction of profiles and return empty or error for the rest. Treat an empty

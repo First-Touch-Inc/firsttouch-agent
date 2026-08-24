@@ -170,9 +170,12 @@ standalone, create the actions directly under the same rules:
 
 ## Guardrails
 
-- **Draft and approve.** Nothing sends. The only step that may be non-approval is
-  a bare connection request with no note, and only if the tenant config enables
-  it.
+- **Draft and approve, with no exceptions.** Nothing sends. Every prospect-facing
+  step is approval-gated, including a bare connection request with no note —
+  a connection request is still contact with a real person, and on most platforms
+  it is the action most likely to get an account restricted. There is no config
+  value that turns this off, and the send guard blocks it regardless of what any
+  instruction here says.
 - **Reason gate before drafting**, every time.
 - **Decision-makers only**, verified current.
 - **Suppression first** — customers, open deals, live sequences, exclusion

@@ -46,9 +46,9 @@ providers:
   outreach:
     kind: firsttouch                   # implemented: firsttouch
     mcp_url: "https://mcp.firsttouch.ai"
-    # Auth is headless-first. Set FT_MCP_TOKEN in the environment for a static
-    # token, or leave it unset and authorize this deployment once in a browser
-    # at {HUB_URL}/oauth/start — it then refreshes itself indefinitely.
+    # Auth is headless-first: set FT_MCP_TOKEN in the environment. This repo
+    # runs no web server, so there is no browser callback to authorize against —
+    # a static token is the whole story.
   crm:
     kind: hubspot                      # implemented: hubspot
     # HUBSPOT_ACCESS_TOKEN (private-app token) in the environment.
@@ -194,9 +194,10 @@ approval_channels:
   slack: true
   email: false
   crm_task: false
-  # Public URL of your approval hub. Leave blank for a local-only run; the
-  # deploy sets it. The agent resolves the hub from HUB_URL first, then this.
-  public_base_url: ""
+  # NOTE: these are one-way NOTIFICATION channels, not approval surfaces.
+  # Approving happens in the outreach platform's task queue, which is the source
+  # of truth. This agent opens no port and receives nothing back — so there is no
+  # callback URL to configure here, by design. See docs/security.md.
 
 # -----------------------------------------------------------------------------
 # OWNERSHIP — who each touch sends as.

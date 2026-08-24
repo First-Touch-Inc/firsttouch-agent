@@ -135,7 +135,6 @@ intended outcome when the research comes up empty.
 | `approval_channels.slack` | boolean | No | Fan the digest out to Slack. |
 | `approval_channels.email` | boolean | No | Fan out by email. Uses `client.digest.email`. |
 | `approval_channels.crm_task` | boolean | No | Mirror as a CRM task. Needs CRM write scopes. |
-| `approval_channels.public_base_url` | string (URL) | No | Public URL of your approval hub. The agent resolves the hub from the `HUB_URL` env var **first**, then this. |
 
 None of these change where approval actually happens. **The outreach platform's
 task queue is always the source of truth**; everything here is a mirror, and the
@@ -303,7 +302,6 @@ environment. That matters under cron; see
 | `STATE_DIR` | `<repo>/state` | Where run state lives. Relative paths resolve against the repo root. **Set this to an absolute path on a mounted volume on any ephemeral host.** |
 | `DRY_RUN` | unset | `1` (the literal string) = research and draft, create nothing. Anything else is off. Also settable with `--dry`. Enforced by the [send guard](security.md#the-send-guard) hook, which denies every mutating tool call while it is set — so "creates nothing" is a control, not an instruction. It also forces `CRM_WRITES_ENABLED=0`. |
 | `RUN_TIMEOUT_MS` | `2700000` (45 min) | Hard timeout. The agent subprocess is `SIGTERM`ed and the run exits non-zero rather than hanging forever. |
-| `HUB_URL` | unset | Approval hub base URL. Takes precedence over `approval_channels.public_base_url`. |
 | `CRON_SCHEDULE` | `0 8 * * 1-5` | Read by `runner/scheduler.mjs` only. Five fields, in the container's local time. |
 | `RUN_ON_START` | unset | `1` = `scheduler.mjs` also runs once immediately at boot. |
 | `TZ` | system | Standard. `scheduler.mjs` schedules in this timezone; Railway and Render cron ignore it entirely (both are UTC). |
