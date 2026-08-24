@@ -109,7 +109,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * `scope` is the private-app scope this particular call needs. HubSpot's 403
  * body does not reliably name the missing scope, and "403 Forbidden" sends
  * people hunting through permissions at random, so each call site passes the
- * scope it depends on and we name it here.
+ * scope it depends on and we name it here. It may be an array: a call that
+ * crosses two object types (reading a contact's associated deals) can 403 for
+ * either one, and naming only half of that pair sends the operator to the
+ * wrong settings page.
  */
 async function describeFailure(res, scope) {
   let body = '';
@@ -119,6 +122,10 @@ async function describeFailure(res, scope) {
     // Body already consumed or the socket died; the status alone still helps.
   }
   const detail = body ? ` HubSpot said: ${body}` : '';
+  const named = (Array.isArray(scope) ? scope : [scope])
+    .filter(Boolean)
+    .map((s) => `"${s}"`)
+    .join(' and ') || 'the one this call depends on';
 
   if (res.status === 401) {
     return new HubSpotError(
@@ -132,7 +139,7 @@ async function describeFailure(res, scope) {
   if (res.status === 403) {
     return new HubSpotError(
       `HubSpot refused this call (403). The private app is missing a required scope: ` +
-      `most likely "${scope}". Add it in HubSpot under Settings > Integrations > Private Apps > ` +
+      `most likely ${named}. Add it in HubSpot under Settings > Integrations > Private Apps > ` +
       `(your app) > Scopes, then re-issue the token — changing scopes invalidates the old one.` + detail,
       { status: 403 },
     );
@@ -271,6 +278,13 @@ const MAX_RECORDS_PER_CALL = 100;
 const MAX_PROPERTY_VALUE_CHARS = 500;
 const MAX_REQUESTED_PROPERTIES = 40;
 
+// HubSpot's own limits on a search body. Exceeding any of them is a 400, so we
+// check before spending the call. Declared up here because the tool schemas
+// quote them, and a schema is built at module load rather than at call time.
+const MAX_FILTER_GROUPS = 5;
+const MAX_FILTERS_PER_GROUP = 6;
+const MAX_FILTERS_TOTAL = 18;
+
 const CONTACT_PROPERTIES = [
   'firstname', 'lastname', 'email', 'jobtitle', 'phone',
   'company', 'website', 'city', 'state', 'country',
@@ -285,6 +299,28 @@ const COMPANY_PROPERTIES = [
   'city', 'state', 'country',
   'lifecyclestage', 'hs_lead_status', 'hubspot_owner_id',
   'createdate', 'notes_last_contacted', 'notes_last_activity_date',
+];
+
+// Deals. `notes_last_updated` is HubSpot's internal name for the deal's "last
+// activity date" — the misleading name costs people hours, so it is spelled out
+// here and in every tool description that touches it. `hs_is_closed`,
+// `hs_is_closed_won` and `hs_is_closed_lost` are HubSpot-calculated read-only
+// booleans (they arrive as the strings "true"/"false"), and they are the reason
+// a deal can be classified open/won/lost without first fetching pipelines.
+const DEAL_PROPERTIES = [
+  'dealname', 'dealstage', 'pipeline', 'amount', 'closedate', 'dealtype',
+  'hubspot_owner_id', 'createdate', 'hs_lastmodifieddate',
+  'notes_last_updated', 'notes_last_contacted', 'hs_next_step',
+  'hs_is_closed', 'hs_is_closed_won', 'hs_is_closed_lost',
+  'num_associated_contacts',
+];
+
+// The subset that answers "does this person have an open deal?". Suppression
+// asks one question, so it should not pay for a full deal record per contact.
+const DEAL_STATUS_PROPERTIES = [
+  'dealname', 'dealstage', 'pipeline', 'amount', 'closedate',
+  'hubspot_owner_id', 'hs_lastmodifieddate', 'notes_last_updated',
+  'hs_is_closed', 'hs_is_closed_won', 'hs_is_closed_lost',
 ];
 
 /** HubSpot's internal object type ids, as returned on a list's `objectTypeId`. */
@@ -318,14 +354,68 @@ function resolveProperties(requested, defaults) {
   return merged.slice(0, MAX_REQUESTED_PROPERTIES);
 }
 
+/** How many associated ids we will spell out on a record before truncating. */
+const MAX_ASSOCIATED_IDS = 10;
+
+const ASSOCIATION_FIELDS = [
+  ['companies', 'associatedCompanyIds'],
+  ['contacts', 'associatedContactIds'],
+  ['deals', 'associatedDealIds'],
+];
+
 /** Shape a raw HubSpot CRM object down to what the agent actually reads. */
 function shapeRecord(record) {
   const shaped = { id: record.id, properties: trimProperties(record.properties) };
-  const companies = record.associations?.companies?.results;
-  if (Array.isArray(companies) && companies.length > 0) {
-    shaped.associatedCompanyIds = companies.map((c) => c.id).slice(0, 10);
+  for (const [type, field] of ASSOCIATION_FIELDS) {
+    const results = record.associations?.[type]?.results;
+    if (!Array.isArray(results) || results.length === 0) continue;
+    // HubSpot repeats a record once per association *type* (a deal's primary
+    // contact also appears under the unlabelled association), so the raw list
+    // contains duplicates. Deduplicate before counting or the agent reads
+    // "three contacts" off one contact associated three ways.
+    const ids = [...new Set(results.map((r) => r.id).filter(Boolean))];
+    shaped[field] = ids.slice(0, MAX_ASSOCIATED_IDS);
+    // Say so when there are more. Silently returning the first ten reads as
+    // "that is all of them", which is how an agent concludes a deal has one
+    // contact when it has forty.
+    if (ids.length > MAX_ASSOCIATED_IDS) {
+      shaped[`${field}Truncated`] = { returned: MAX_ASSOCIATED_IDS, total: ids.length };
+    }
   }
   return shaped;
+}
+
+/**
+ * Classify a deal as open / won / lost without hardcoding stage ids.
+ *
+ * Two independent sources, cheapest first:
+ *   1. `hs_is_closed_won` / `hs_is_closed_lost` — HubSpot-calculated read-only
+ *      properties that come back on the deal itself, so they cost nothing.
+ *   2. the pipeline stage index from crm_get_pipelines, when the caller asked
+ *      for it, which also survives a portal where the calculated properties
+ *      were never requested.
+ *
+ * Anything it cannot decide is `"unknown"`, never `"open"` and never `"lost"`.
+ * This function backs an open-deal SUPPRESSION check, and the two failure modes
+ * are not symmetric: guessing "lost" prospects someone the sales team is
+ * actively closing, while "unknown" merely asks the agent to be careful.
+ */
+function classifyDeal(properties, stageIndex = null) {
+  const isTrue = (v) => v === 'true' || v === true;
+  const isFalse = (v) => v === 'false' || v === false;
+
+  if (isTrue(properties?.hs_is_closed_won)) return 'won';
+  if (isTrue(properties?.hs_is_closed_lost)) return 'lost';
+
+  const stage = stageIndex?.get(properties?.dealstage);
+  if (stage) {
+    if (!stage.closed) return 'open';
+    return stage.won ? 'won' : 'lost';
+  }
+
+  if (isFalse(properties?.hs_is_closed)) return 'open';
+  if (isTrue(properties?.hs_is_closed)) return 'closed';   // closed, direction unknown
+  return 'unknown';
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +770,400 @@ const tools = [
   },
 
   {
+    name: 'crm_search_deals',
+    description:
+      'Find deals by pipeline, stage, owner, amount, close date, or how long they have been quiet. ' +
+      'This is the tool for the stalled-deal motion: `only_open: true` plus `no_activity_days: 30` returns ' +
+      'open deals nobody has touched in a month, newest-stalled first if you sort on it. ' +
+      'Every record comes back with a decoded `status` of open/won/lost, so you do NOT need crm_get_pipelines ' +
+      'just to tell those apart. ' +
+      'COST: one HubSpot call, plus one pipelines call the first time in a run (cached afterwards), and up to ' +
+      '100 records of context. HubSpot caps search at 200 per page and 10,000 ' +
+      'results total per query, and rate-limits search harder than other endpoints (about 5 requests/second). ' +
+      'DO NOT use this to answer "does this one contact have an open deal?" — that is crm_get_deals_for_contact, ' +
+      'which follows the association directly instead of guessing at a filter. ' +
+      'DO NOT call it once per account in a loop; filter once and page. ' +
+      'The convenience arguments below are ANDed into every filter group, so they narrow the search rather than ' +
+      'widening it. Use `filter_groups` directly only for something they cannot express.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pipeline: { type: 'string', description: 'Pipeline id (NOT its label). Get ids from crm_get_pipelines.' },
+        stages: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Deal stage ids to include. Stage ids are portal-specific — read them from crm_get_pipelines, never guess.',
+        },
+        exclude_stages: { type: 'array', items: { type: 'string' }, description: 'Deal stage ids to exclude.' },
+        owner_id: { type: 'string', description: 'HubSpot owner id (`hubspot_owner_id`), from crm_get_owners.' },
+        only_open: {
+          type: 'boolean',
+          description:
+            'True = only deals still in play. Uses HubSpot\'s calculated `hs_is_closed`, so it is exact and does ' +
+            'not depend on knowing which stages are closed.',
+        },
+        only_closed: { type: 'boolean', description: 'True = only closed deals (won or lost). Cannot be combined with only_open.' },
+        amount_min: { type: 'number', description: 'Minimum deal `amount`, inclusive.' },
+        amount_max: { type: 'number', description: 'Maximum deal `amount`, inclusive.' },
+        close_date_after: { type: ['string', 'number'], description: 'Deals with `closedate` on or after this. ISO date, ISO timestamp, or epoch ms.' },
+        close_date_before: { type: ['string', 'number'], description: 'Deals with `closedate` on or before this. ISO date, ISO timestamp, or epoch ms.' },
+        no_activity_days: {
+          type: 'number',
+          minimum: 0,
+          description:
+            'Deals with no logged activity in this many days — the stalled-deal filter. Applies to HubSpot\'s ' +
+            '`notes_last_updated`, which despite the name is the deal\'s LAST ACTIVITY DATE (calls, emails, ' +
+            'meetings, tasks and notes). A deal that has never had activity has no value here and will NOT match.',
+        },
+        last_activity_before: { type: ['string', 'number'], description: 'Same filter as no_activity_days, with an explicit date. Give one or the other, not both.' },
+        last_modified_before: { type: ['string', 'number'], description: 'Deals whose `hs_lastmodifieddate` is before this. Property edits, not just human activity.' },
+        last_modified_after: { type: ['string', 'number'], description: 'Deals whose `hs_lastmodifieddate` is after this.' },
+        resolve_stages: {
+          type: 'boolean',
+          default: true,
+          description:
+            'Resolve each result\'s stage id against the portal\'s pipelines, so `status` and `stageLabel` are ' +
+            'filled in even on a deal whose calculated hs_is_closed_* properties are absent. Pipelines are cached ' +
+            'for the run, so this costs at most one extra call per run. Set false to guarantee a single call.',
+        },
+        filter_groups: {
+          type: 'array',
+          maxItems: MAX_FILTER_GROUPS,
+          description:
+            `Advanced escape hatch. Up to ${MAX_FILTER_GROUPS} groups of up to ${MAX_FILTERS_PER_GROUP} filters ` +
+            `(${MAX_FILTERS_TOTAL} total, HubSpot's limit). Filters in a group are ANDed; groups are ORed. ` +
+            'The convenience arguments above are appended to EVERY group.',
+          items: {
+            type: 'object',
+            properties: {
+              filters: {
+                type: 'array',
+                maxItems: MAX_FILTERS_PER_GROUP,
+                items: {
+                  type: 'object',
+                  properties: {
+                    propertyName: { type: 'string', description: 'HubSpot internal property name, e.g. "dealstage".' },
+                    operator: {
+                      type: 'string',
+                      enum: ['EQ', 'NEQ', 'LT', 'LTE', 'GT', 'GTE', 'BETWEEN', 'IN', 'NOT_IN',
+                        'HAS_PROPERTY', 'NOT_HAS_PROPERTY', 'CONTAINS_TOKEN', 'NOT_CONTAINS_TOKEN'],
+                      description: 'BETWEEN needs highValue; IN/NOT_IN use `values`. Date values are epoch milliseconds.',
+                    },
+                    value: { type: ['string', 'number', 'boolean'] },
+                    highValue: { type: ['string', 'number'] },
+                    values: { type: 'array', items: { type: 'string' } },
+                  },
+                  required: ['propertyName', 'operator'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['filters'],
+            additionalProperties: false,
+          },
+        },
+        query: { type: 'string', description: 'Free-text search across default searchable deal fields.' },
+        sorts: {
+          type: 'array',
+          maxItems: 1,
+          description: 'HubSpot honours a single sort. For stalled deals, sort on "notes_last_updated" ASCENDING (quietest first).',
+          items: {
+            type: 'object',
+            properties: {
+              propertyName: { type: 'string' },
+              direction: { type: 'string', enum: ['ASCENDING', 'DESCENDING'] },
+            },
+            required: ['propertyName', 'direction'],
+            additionalProperties: false,
+          },
+        },
+        limit: { type: 'integer', minimum: 1, maximum: MAX_RECORDS_PER_CALL, default: 25, description: `1-${MAX_RECORDS_PER_CALL}, default 25.` },
+        after: { type: 'string', description: 'Paging cursor from a previous call\'s `nextAfter`.' },
+        properties: { type: 'array', items: { type: 'string' }, description: 'Extra property names on top of the default set (tenant-specific custom deal fields).' },
+      },
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const { filters, errors } = compileDealFilters(args);
+      if (errors.length > 0) return fail(`Could not build the deal search: ${errors.join(' ')}`);
+
+      const groups = mergeFilterGroups(args.filter_groups, filters);
+      const limitProblem = checkFilterLimits(groups);
+      if (limitProblem) return fail(limitProblem);
+
+      // Resolve the stage index BEFORE the search so every result can be
+      // classified the same way crm_get_deal and crm_get_deals_for_contact
+      // classify theirs. Without it a deal whose portal does not populate the
+      // calculated hs_is_closed_* properties comes back "unknown" here while
+      // the other two tools call it "open" — the same deal, two answers.
+      let stageIndex = null;
+      if (args.resolve_stages !== false) {
+        try {
+          ({ stageIndex } = await loadDealPipelines());
+        } catch (error) {
+          // Losing the labels is not worth losing the search results.
+          if (!(error instanceof HubSpotError)) throw error;
+          log(`stage resolution unavailable for crm_search_deals: ${error.message}`);
+        }
+      }
+
+      return runSearch(
+        'deals',
+        { ...args, filter_groups: groups },
+        DEAL_PROPERTIES,
+        'crm.objects.deals.read',
+        (record) => {
+          const stage = stageIndex?.get(record.properties?.dealstage) ?? null;
+          return {
+            ...record,
+            status: classifyDeal(record.properties, stageIndex),
+            ...(stage ? { stageLabel: stage.label, pipelineLabel: stage.pipelineLabel } : {}),
+          };
+        },
+      );
+    },
+  },
+
+  {
+    name: 'crm_get_deal',
+    description:
+      'Read one deal by id: its properties plus the ids of the contacts and the company it is associated with. ' +
+      'Use it after crm_search_deals has narrowed the field, to work out WHY a specific deal stalled — which ' +
+      'stage it sits in, how much is on the table, when it was supposed to close, and who owns it. ' +
+      'COST: one HubSpot call (two if `resolve_stage` is on and the pipeline list is not already cached this ' +
+      'run), one record of context. ' +
+      'DO NOT call this in a loop over search results — crm_search_deals already returned the same properties ' +
+      'and a decoded status for every deal in the page. Reach for this only when you need the associations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'string', description: 'HubSpot deal record id.' },
+        resolve_stage: {
+          type: 'boolean',
+          default: true,
+          description:
+            'Look the stage id up in the portal\'s pipelines so the result carries a human stage label and its ' +
+            'open/won/lost meaning. Pipelines are cached for the run, so this is usually free. Set false to ' +
+            'guarantee exactly one HubSpot call.',
+        },
+        properties: { type: 'array', items: { type: 'string' }, description: 'Extra property names on top of the default set.' },
+      },
+      required: ['deal_id'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const dealId = String(args.deal_id ?? '').trim();
+      if (!dealId) return fail('deal_id is required.');
+
+      const record = await hubspotFetch(`/crm/v3/objects/deals/${encodeURIComponent(dealId)}`, {
+        query: {
+          properties: resolveProperties(args.properties, DEAL_PROPERTIES),
+          associations: 'contacts,companies',
+        },
+        scope: 'crm.objects.deals.read',
+      });
+
+      const shaped = shapeRecord(record);
+      let stageIndex = null;
+      let pipelinesUnavailable = null;
+      if (args.resolve_stage !== false) {
+        try {
+          ({ stageIndex } = await loadDealPipelines());
+        } catch (error) {
+          // A missing pipelines read must not blank out the deal itself. The
+          // calculated hs_is_closed_* properties still classify it.
+          if (!(error instanceof HubSpotError)) throw error;
+          pipelinesUnavailable = error.message;
+        }
+      }
+
+      const stage = stageIndex?.get(shaped.properties?.dealstage) ?? null;
+      return ok({
+        ...shaped,
+        status: classifyDeal(shaped.properties, stageIndex),
+        stage: stage
+          ? { id: stage.id, label: stage.label, meaning: stage.meaning, probability: stage.probability, pipelineLabel: stage.pipelineLabel }
+          : null,
+        ...(pipelinesUnavailable ? { pipelinesUnavailable } : {}),
+      });
+    },
+  },
+
+  {
+    name: 'crm_get_deals_for_contact',
+    description:
+      'List the deals associated with ONE contact, each classified as open, won or lost. ' +
+      'This is the tool behind the "contacts with an open deal" suppression check: a person your sales team is ' +
+      'mid-negotiation with must not receive prospecting outreach, and this is how you find out before drafting. ' +
+      'Read `hasOpenDeal` for the yes/no answer. ' +
+      'COST: two HubSpot calls (the contact\'s associations, then one batch read of the deals), plus a cached ' +
+      'pipelines call the first time in a run. Up to 100 deals of context. ' +
+      'DO NOT call this for every contact in a large list before qualifying them — check it just before drafting, ' +
+      'once the candidate has survived the cheaper filters. ' +
+      'IMPORTANT: if `unclassifiedCount` is above zero, some deal could not be resolved to open/won/lost. Treat ' +
+      'those as possibly open and suppress the contact — the cost of skipping one prospect is far below the cost ' +
+      'of cold-emailing an account that is under contract negotiation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contact_id: { type: 'string', description: 'HubSpot contact record id (not an email address).' },
+        resolve_stages: {
+          type: 'boolean',
+          default: true,
+          description:
+            'Resolve each deal\'s stage id to a label and its open/won/lost meaning via the portal\'s pipelines. ' +
+            'Cached for the run. Turning this off leaves classification to the deal\'s calculated ' +
+            'hs_is_closed_won / hs_is_closed_lost properties, which is usually enough but produces more "unknown".',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: MAX_RECORDS_PER_CALL,
+          default: 25,
+          description: `Most deals to read back, 1-${MAX_RECORDS_PER_CALL}. Default 25. Contacts with more deals than this report the shortfall.`,
+        },
+        properties: { type: 'array', items: { type: 'string' }, description: 'Extra deal property names on top of the default set.' },
+      },
+      required: ['contact_id'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const contactId = String(args.contact_id ?? '').trim();
+      if (!contactId) return fail('contact_id is required.');
+      const limit = clampLimit(args.limit, 25, MAX_RECORDS_PER_CALL);
+
+      // Read the association off the contact rather than searching deals for
+      // this contact id: the association is the actual source of truth, and it
+      // stays on the v3 surface the rest of this adapter uses.
+      //
+      // This one call spans two object types, so a 403 can come from either
+      // scope — hence both are named.
+      const contact = await hubspotFetch(`/crm/v3/objects/contacts/${encodeURIComponent(contactId)}`, {
+        query: { properties: ['email'], associations: 'deals' },
+        scope: ['crm.objects.contacts.read', 'crm.objects.deals.read'],
+      });
+
+      const allDealIds = [...new Set(
+        (contact?.associations?.deals?.results ?? []).map((d) => d.id).filter(Boolean),
+      )];
+      const dealIds = allDealIds.slice(0, limit);
+
+      const base = {
+        contactId,
+        email: contact?.properties?.email ?? null,
+        totalAssociatedDeals: allDealIds.length,
+      };
+
+      if (dealIds.length === 0) {
+        // No deals at all is a definite answer, not an unknown: the contact has
+        // no association, so nothing is being negotiated.
+        return ok({ ...base, count: 0, openDealCount: 0, hasOpenDeal: false, unclassifiedCount: 0, deals: [] });
+      }
+
+      const batch = await hubspotFetch('/crm/v3/objects/deals/batch/read', {
+        method: 'POST',
+        body: {
+          inputs: dealIds.map((id) => ({ id })),
+          properties: resolveProperties(args.properties, DEAL_STATUS_PROPERTIES),
+        },
+        scope: 'crm.objects.deals.read',
+      });
+
+      let stageIndex = null;
+      let pipelinesUnavailable = null;
+      if (args.resolve_stages !== false) {
+        try {
+          ({ stageIndex } = await loadDealPipelines());
+        } catch (error) {
+          if (!(error instanceof HubSpotError)) throw error;
+          pipelinesUnavailable = error.message;
+        }
+      }
+
+      const deals = (batch?.results ?? []).map((record) => {
+        const shaped = shapeRecord(record);
+        const stage = stageIndex?.get(shaped.properties?.dealstage) ?? null;
+        return {
+          ...shaped,
+          status: classifyDeal(shaped.properties, stageIndex),
+          stageLabel: stage?.label ?? null,
+          pipelineLabel: stage?.pipelineLabel ?? null,
+        };
+      });
+
+      const openDealCount = deals.filter((d) => d.status === 'open').length;
+      const unclassifiedCount = deals.filter((d) => d.status === 'unknown' || d.status === 'closed').length;
+
+      return ok({
+        ...base,
+        count: deals.length,
+        openDealCount,
+        hasOpenDeal: openDealCount > 0,
+        unclassifiedCount,
+        // Say it in words too. A suppression decision read off a boolean the
+        // agent half-remembers is worth spelling out at the point of use.
+        suppressionAdvice: openDealCount > 0
+          ? 'This contact has an open deal. Suppress: do not draft prospecting outreach.'
+          : unclassifiedCount > 0
+            ? 'Some deals could not be classified. Treat them as possibly open and suppress this contact.'
+            : 'No open deal found. This contact is not suppressed by the open-deal rule.',
+        deals,
+        ...(allDealIds.length > dealIds.length
+          ? { truncated: { returned: dealIds.length, total: allDealIds.length, note: 'Raise `limit` to see the rest.' } }
+          : {}),
+        ...(pipelinesUnavailable ? { pipelinesUnavailable } : {}),
+      });
+    },
+  },
+
+  {
+    name: 'crm_get_pipelines',
+    description:
+      'List the portal\'s deal pipelines and their stages, with each stage flagged `closed`, `won` and `lost`. ' +
+      'Call this ONCE per run, before you reason about deal stages. Stage ids are portal-specific opaque strings ' +
+      '— "appointmentscheduled" in one account, "1234567" in the next — so there is no stage id you can safely ' +
+      'hardcode, and no way to tell an open deal from a won one by reading `dealstage` alone. ' +
+      'Each stage carries `meaning`: "open", "closed-won" or "closed-lost". Branch on that. ' +
+      'COST: one HubSpot call, and the result is cached for ten minutes, so repeat calls in the same run are free. ' +
+      'DO NOT call this per deal, and do not call it at all if you only need open/won/lost — crm_search_deals and ' +
+      'crm_get_deals_for_contact already return a decoded `status`. Reach for this when you need to FILTER by ' +
+      'stage (to pass stage ids to crm_search_deals) or to show a human a stage name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_archived: {
+          type: 'boolean',
+          default: false,
+          description: 'Include archived pipelines and stages. Off by default — archived stages still appear on old deals but are not worth the context.',
+        },
+        refresh: { type: 'boolean', default: false, description: 'Bypass the ten-minute cache. Only needed if someone edited a pipeline mid-run.' },
+      },
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const { pipelines, cached } = await loadDealPipelines({ refresh: args.refresh === true });
+
+      const includeArchived = args.include_archived === true;
+      const visible = pipelines
+        .filter((p) => includeArchived || !p.archived)
+        .map((p) => ({ ...p, stages: p.stages.filter((s) => includeArchived || !s.archived) }));
+
+      return ok({
+        objectType: 'deals',
+        cached,
+        count: visible.length,
+        pipelines: visible,
+        // The decoding rule, restated next to the data it applies to, so an
+        // agent that reads only this result still classifies correctly.
+        stageSemantics:
+          'Per stage: `closed` false means the deal is still in play. `closed` true with `won` true is Closed Won ' +
+          '(probability 1.0); `closed` true with `lost` true is Closed Lost (probability 0.0). `meaning` says the ' +
+          'same thing in one field. Never infer any of this from a stage label or id.',
+      });
+    },
+  },
+
+  {
     name: 'crm_get_owners',
     description:
       'List the CRM owners (sales reps) in the account: owner id, email, and name. Use it once per run to turn ' +
@@ -944,8 +1428,227 @@ const ENGAGEMENTS = {
   },
 };
 
-/** Shared body for the two search tools — they differ only in object type. */
-async function runSearch(objectType, args, defaults, scope) {
+// ---------------------------------------------------------------------------
+// Deal pipelines
+// ---------------------------------------------------------------------------
+//
+// Stage ids are portal-specific opaque strings ("appointmentscheduled" in one
+// account, "1234567" in the next), so an agent cannot tell an open deal from a
+// won one by looking at `dealstage`. The pipeline definition is what carries
+// that meaning, and it changes roughly never, so we fetch it once and cache it
+// for the life of a run rather than paying for it on every classification.
+
+const PIPELINE_CACHE_TTL_MS = 10 * 60 * 1000;
+let dealPipelineCache = null;
+
+/**
+ * Normalise one pipeline's stages, decoding HubSpot's stage metadata into
+ * plain booleans.
+ *
+ * Two shapes to be careful about, both verified against HubSpot's docs:
+ *   - metadata values are STRINGS, not JSON booleans/numbers: `isClosed` is
+ *     `"true"`, `probability` is `"1.0"`.
+ *   - the stage identifier is `id` on `GET /crm/v3/pipelines/{objectType}` but
+ *     `stageId` on the audit endpoint, so we read whichever is present.
+ *
+ * Won versus lost is `probability`: HubSpot defines 1.0 as Closed Won and 0.0
+ * as Closed Lost. `isClosed` alone only tells you the deal stopped moving.
+ */
+function shapePipelines(data) {
+  return (data?.results ?? []).map((pipeline) => ({
+    id: pipeline.id,
+    label: pipeline.label ?? null,
+    displayOrder: pipeline.displayOrder ?? null,
+    archived: pipeline.archived === true,
+    stages: (pipeline.stages ?? [])
+      .slice()
+      .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0))
+      .map((stage) => {
+        const closed = String(stage.metadata?.isClosed ?? '').toLowerCase() === 'true';
+        const probability = Number(stage.metadata?.probability);
+        const won = closed && Number.isFinite(probability) && probability >= 1;
+        return {
+          id: stage.id ?? stage.stageId ?? null,
+          label: stage.label ?? null,
+          displayOrder: stage.displayOrder ?? null,
+          archived: stage.archived === true,
+          probability: Number.isFinite(probability) ? probability : null,
+          closed,
+          won: closed && won,
+          lost: closed && !won,
+          // One field the agent can branch on without reasoning about the
+          // other three.
+          meaning: closed ? (won ? 'closed-won' : 'closed-lost') : 'open',
+        };
+      }),
+  }));
+}
+
+/** stage id -> stage, across every pipeline. Stage ids are unique per portal. */
+function indexStages(pipelines) {
+  const index = new Map();
+  for (const pipeline of pipelines) {
+    for (const stage of pipeline.stages) {
+      if (stage.id) index.set(stage.id, { ...stage, pipelineId: pipeline.id, pipelineLabel: pipeline.label });
+    }
+  }
+  return index;
+}
+
+async function loadDealPipelines({ refresh = false } = {}) {
+  if (!refresh && dealPipelineCache && Date.now() - dealPipelineCache.at < PIPELINE_CACHE_TTL_MS) {
+    return { ...dealPipelineCache, cached: true };
+  }
+  const data = await hubspotFetch('/crm/v3/pipelines/deals', { scope: 'crm.objects.deals.read' });
+  const pipelines = shapePipelines(data);
+  dealPipelineCache = { at: Date.now(), pipelines, stageIndex: indexStages(pipelines) };
+  return { ...dealPipelineCache, cached: false };
+}
+
+// ---------------------------------------------------------------------------
+// Deal search filters
+// ---------------------------------------------------------------------------
+
+/**
+ * HubSpot's search API takes date filter values as epoch milliseconds — its own
+ * examples do — but a model reasoning about "no activity in 90 days" writes an
+ * ISO date, and making it convert by hand is a needless source of off-by-a-month
+ * errors. Accept both.
+ *
+ * Note for `closedate` and other DATE (not DATETIME) properties: HubSpot stores
+ * them at UTC midnight, so a bare "2026-05-01" is exactly right and a local
+ * timestamp can land on the wrong day.
+ */
+function toEpochMs(value, label, errors) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(Math.trunc(value));
+  const raw = String(value).trim();
+  if (/^\d{10,}$/.test(raw)) return raw;                       // already epoch ms
+  const parsed = Date.parse(raw);
+  if (Number.isNaN(parsed)) {
+    errors.push(
+      `${label} is not a date I can read (${JSON.stringify(value)}). Use an ISO-8601 date ` +
+      '("2026-05-01"), an ISO timestamp ("2026-05-01T00:00:00Z"), or epoch milliseconds.',
+    );
+    return undefined;
+  }
+  return String(parsed);
+}
+
+/**
+ * Turn the convenience arguments on crm_search_deals into HubSpot filters.
+ *
+ * The raw `filter_groups` escape hatch stays available, but the common pipeline
+ * questions — one owner, one pipeline, open only, nothing touched in N days —
+ * should not require the model to remember HubSpot's operator vocabulary and
+ * internal property names on every call.
+ */
+function compileDealFilters(args) {
+  const filters = [];
+  const errors = [];
+  const num = (value, label) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) { errors.push(`${label} must be a number, got ${JSON.stringify(value)}.`); return undefined; }
+    return String(n);
+  };
+
+  if (args.pipeline) filters.push({ propertyName: 'pipeline', operator: 'EQ', value: String(args.pipeline) });
+
+  if (Array.isArray(args.stages) && args.stages.length > 0) {
+    filters.push({ propertyName: 'dealstage', operator: 'IN', values: args.stages.map(String) });
+  }
+  if (Array.isArray(args.exclude_stages) && args.exclude_stages.length > 0) {
+    filters.push({ propertyName: 'dealstage', operator: 'NOT_IN', values: args.exclude_stages.map(String) });
+  }
+
+  if (args.owner_id) filters.push({ propertyName: 'hubspot_owner_id', operator: 'EQ', value: String(args.owner_id) });
+
+  // `hs_is_closed` is HubSpot-calculated, so this is true "still in play"
+  // rather than a guess assembled from stage ids.
+  if (args.only_open === true) filters.push({ propertyName: 'hs_is_closed', operator: 'EQ', value: 'false' });
+  if (args.only_closed === true) filters.push({ propertyName: 'hs_is_closed', operator: 'EQ', value: 'true' });
+  if (args.only_open === true && args.only_closed === true) {
+    errors.push('only_open and only_closed cannot both be true — that matches no deal at all.');
+  }
+
+  if (args.amount_min !== undefined) {
+    const v = num(args.amount_min, 'amount_min');
+    if (v !== undefined) filters.push({ propertyName: 'amount', operator: 'GTE', value: v });
+  }
+  if (args.amount_max !== undefined) {
+    const v = num(args.amount_max, 'amount_max');
+    if (v !== undefined) filters.push({ propertyName: 'amount', operator: 'LTE', value: v });
+  }
+
+  const closeAfter = toEpochMs(args.close_date_after, 'close_date_after', errors);
+  if (closeAfter) filters.push({ propertyName: 'closedate', operator: 'GTE', value: closeAfter });
+  const closeBefore = toEpochMs(args.close_date_before, 'close_date_before', errors);
+  if (closeBefore) filters.push({ propertyName: 'closedate', operator: 'LTE', value: closeBefore });
+
+  const modifiedBefore = toEpochMs(args.last_modified_before, 'last_modified_before', errors);
+  if (modifiedBefore) filters.push({ propertyName: 'hs_lastmodifieddate', operator: 'LT', value: modifiedBefore });
+  const modifiedAfter = toEpochMs(args.last_modified_after, 'last_modified_after', errors);
+  if (modifiedAfter) filters.push({ propertyName: 'hs_lastmodifieddate', operator: 'GT', value: modifiedAfter });
+
+  // The stalled-deal knob. `no_activity_days` is the phrasing the play uses;
+  // `last_activity_before` is the same filter with an explicit date.
+  if (args.no_activity_days !== undefined && args.last_activity_before !== undefined) {
+    errors.push('Give either no_activity_days or last_activity_before, not both — they set the same filter.');
+  }
+  let activityBefore = toEpochMs(args.last_activity_before, 'last_activity_before', errors);
+  if (args.no_activity_days !== undefined) {
+    const days = Number(args.no_activity_days);
+    if (!Number.isFinite(days) || days < 0) errors.push(`no_activity_days must be a non-negative number of days, got ${JSON.stringify(args.no_activity_days)}.`);
+    else activityBefore = String(Date.now() - Math.trunc(days) * 86_400_000);
+  }
+  if (activityBefore) {
+    // `notes_last_updated` IS the deal's "last activity date" in HubSpot,
+    // despite the name suggesting it only covers notes.
+    filters.push({ propertyName: 'notes_last_updated', operator: 'LT', value: activityBefore });
+  }
+
+  return { filters, errors };
+}
+
+/**
+ * Merge the compiled convenience filters into the caller's raw filter groups.
+ *
+ * Groups are ORed and filters within a group are ANDed, so a convenience filter
+ * has to be added to EVERY group to mean "and also this". Appending it as its
+ * own group would instead widen the search, which is the opposite of what
+ * "only open deals" means.
+ */
+function mergeFilterGroups(rawGroups, extraFilters) {
+  const raw = Array.isArray(rawGroups) ? rawGroups : [];
+  if (raw.length === 0) return extraFilters.length > 0 ? [{ filters: extraFilters }] : [];
+  return raw.map((group) => ({
+    ...group,
+    filters: [...(Array.isArray(group?.filters) ? group.filters : []), ...extraFilters],
+  }));
+}
+
+/** Check a merged filter set against HubSpot's limits before we spend the call. */
+function checkFilterLimits(groups) {
+  if (groups.length > MAX_FILTER_GROUPS) {
+    return `Too many filter groups (${groups.length}). HubSpot allows at most ${MAX_FILTER_GROUPS}.`;
+  }
+  let total = 0;
+  for (const [i, group] of groups.entries()) {
+    const count = group.filters?.length ?? 0;
+    total += count;
+    if (count > MAX_FILTERS_PER_GROUP) {
+      return `Filter group ${i} has ${count} filters after merging the convenience arguments. ` +
+        `HubSpot allows at most ${MAX_FILTERS_PER_GROUP} per group — drop some filters or move them into another group.`;
+    }
+  }
+  if (total > MAX_FILTERS_TOTAL) {
+    return `Too many filters overall (${total}). HubSpot allows at most ${MAX_FILTERS_TOTAL} across all groups.`;
+  }
+  return null;
+}
+
+/** Shared body for the search tools — they differ only in object type. */
+async function runSearch(objectType, args, defaults, scope, decorate) {
   const filterGroups = Array.isArray(args.filter_groups) ? args.filter_groups : [];
   if (filterGroups.length === 0 && !args.query) {
     return fail(
@@ -971,7 +1674,10 @@ async function runSearch(objectType, args, defaults, scope) {
     // say so rather than letting the agent believe it has seen everything.
     total: found?.total ?? null,
     count: found?.results?.length ?? 0,
-    records: (found?.results ?? []).map(shapeRecord),
+    records: (found?.results ?? []).map((record) => {
+      const shaped = shapeRecord(record);
+      return decorate ? decorate(shaped) : shaped;
+    }),
     nextAfter: found?.paging?.next?.after ?? null,
   });
 }
@@ -1034,8 +1740,12 @@ async function handleRequest(id, method, params) {
         instructions:
           'Read-mostly HubSpot adapter. Prefer crm_get_list_members for a known list and the search tools ' +
           'when you know criteria but not ids. Always check crm_get_contact_activity before drafting outreach ' +
-          'to a contact, so you do not talk over a rep who is already in the conversation. ' +
-          'crm_update_property is the only write and stays disabled unless the operator enabled it.',
+          'to a contact, so you do not talk over a rep who is already in the conversation, and ' +
+          'crm_get_deals_for_contact before prospecting one, so you do not cold-email an account that is ' +
+          'already in a live deal. Deal stage ids are portal-specific: read them from crm_get_pipelines ' +
+          'rather than hardcoding any, though the deal tools already return a decoded open/won/lost `status`. ' +
+          'crm_update_property is the only write and stays disabled unless the operator enabled it. ' +
+          'There are no deal writes at all.',
       });
     }
 

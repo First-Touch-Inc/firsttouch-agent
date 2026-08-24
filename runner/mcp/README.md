@@ -5,9 +5,13 @@ server the agent spawns over stdio.
 
 `hubspot-server.mjs` is the HubSpot adapter: it authenticates with a HubSpot
 **private-app token** (`HUBSPOT_ACCESS_TOKEN`, sent as `Bearer` against
-`api.hubapi.com`) and exposes eight tools the agent uses to decide who is worth
-working today. Seven of them read. One writes, and it is switched off by
+`api.hubapi.com`) and exposes twelve tools the agent uses to decide who is worth
+working today. Eleven of them read. One writes, and it is switched off by
 default — see [the write gate](#the-write-gate).
+
+**There are no deal writes at all** — not gated, not implemented. The four deal
+tools read pipeline state so the agent can avoid people it should not contact;
+moving a deal stage is a sales decision, not an agent one.
 
 It has **no npm dependencies**. Node >= 20 provides `fetch`, and MCP over stdio
 is small enough to implement directly, so it is implemented directly: JSON-RPC
@@ -55,6 +59,10 @@ afterwards and update your `.env`.
 | `crm_get_company` | `crm.objects.companies.read` |
 | `crm_search_contacts` | `crm.objects.contacts.read` |
 | `crm_search_companies` | `crm.objects.companies.read` |
+| `crm_search_deals` | `crm.objects.deals.read` (the same scope covers the cached pipelines lookup) |
+| `crm_get_deal` | `crm.objects.deals.read` |
+| `crm_get_deals_for_contact` | **both** `crm.objects.contacts.read` **and** `crm.objects.deals.read` — the call reads a contact and its deal associations, so either scope can 403 it |
+| `crm_get_pipelines` | `crm.objects.deals.read` |
 | `crm_get_owners` | `crm.objects.owners.read` |
 | `crm_get_contact_activity` | `crm.objects.contacts.read`; **plus `sales-email-read` for the `emails` type** |
 | `crm_update_property` | `crm.objects.contacts.write` and/or `crm.objects.companies.write` (in addition to the matching read scope) |
@@ -65,12 +73,28 @@ The minimum read-only set for a normal run:
 crm.lists.read
 crm.objects.contacts.read
 crm.objects.companies.read
+crm.objects.deals.read
 crm.objects.owners.read
 sales-email-read
 ```
 
+`crm.objects.deals.read` is the only scope the deal tools need. It covers three
+different endpoint families, which is worth knowing because none of them have a
+scope of their own:
+
+- deal reads and search — `/crm/v3/objects/deals/*`
+- **deal pipelines** — `GET /crm/v3/pipelines/deals`. There is no
+  `crm.pipelines.read`. The only scope strings HubSpot publishes under
+  "pipelines" are `crm.pipelines.orders.read` / `.write`, and those are for
+  **order** pipelines in Commerce Hub, not deals. Granting one of those instead
+  will not make `crm_get_pipelines` work.
+- **the contact→deal association**, read via the `associations` parameter on the
+  contact. This one needs the scope for *both* ends, so
+  `crm_get_deals_for_contact` fails without `crm.objects.contacts.read` as well.
+
 If a call comes back `403`, the adapter names the scope it thinks is missing in
-the error text rather than making you guess from a bare status code.
+the error text rather than making you guess from a bare status code — and for
+the two-object-type call it names both candidates.
 
 > **Not fully verified:** HubSpot's public docs do not state the scope for the
 > notes/calls/meetings/tasks engagement endpoints as clearly as they do for
@@ -79,6 +103,49 @@ the error text rather than making you guess from a bare status code.
 > `crm_get_contact_activity` returns a `403` for one activity type, read the
 > scope named in the message and add it — the tool degrades per type rather than
 > failing the whole call, so the other activity types still come back.
+
+## The deal tools
+
+Four read-only tools, added for two motions that were previously impossible:
+
+| Tool | What it answers |
+|---|---|
+| `crm_search_deals` | "Which open deals has nobody touched in 30 days?" Filter-based deal search |
+| `crm_get_deal` | One deal with its properties and its associated contact and company ids |
+| `crm_get_deals_for_contact` | "Does this person have an open deal?" — the open-deal suppression check |
+| `crm_get_pipelines` | Every pipeline and stage, with `closed` / `won` / `lost` decoded |
+
+**Open-deal suppression.** `config/tenant.example.yaml` lists `"Contacts with an
+open deal"` under `suppression`, and the skills reference it. `crm_get_deals_for_contact`
+is what implements it: it returns `hasOpenDeal` plus a per-deal
+`status` of `open` / `won` / `lost`.
+
+**Stalled-deal follow-up.** `crm_search_deals` takes `only_open: true` with
+`no_activity_days: 30` and returns open deals that have gone quiet, with stage,
+amount, close date and owner attached, so the agent can diagnose the stall.
+
+### Why stage ids are not hardcoded anywhere
+
+Deal stage ids are **portal-specific opaque strings** — `appointmentscheduled`
+in one account, `9876543` in the next — so nothing in this adapter can know
+which stage means "won". Two independent mechanisms resolve it, and both are
+returned to the agent:
+
+1. **`hs_is_closed`, `hs_is_closed_won` and `hs_is_closed_lost`** — HubSpot
+   *calculates* these read-only booleans on every deal, so they cost nothing
+   extra. They arrive as the strings `"true"` / `"false"`, not JSON booleans.
+2. **`crm_get_pipelines`** — each stage's `metadata.isClosed` says whether it
+   stops the deal, and `metadata.probability` says which way it went: HubSpot
+   defines **1.0 as Closed Won and 0.0 as Closed Lost**. The adapter decodes
+   that into plain `closed` / `won` / `lost` booleans plus a single `meaning`
+   field, so the agent never has to know the rule. Pipeline definitions are
+   cached for **ten minutes**, so the extra call happens at most once a run.
+
+**Unclassifiable deals are reported as `"unknown"`, never as "not open".** The
+two mistakes are not symmetric: reading a live negotiation as "no open deal"
+sends prospecting mail into an account your team is trying to close, so
+`crm_get_deals_for_contact` returns an `unclassifiedCount` and tells the agent
+in words to suppress the contact when it is above zero.
 
 ## The write gate
 
@@ -152,7 +219,7 @@ like a hang and gets killed by the client's own timeout.
 
 ## Adding an adapter for a different CRM
 
-The contract is the eight tool names in
+The contract is the twelve tool names in
 [`docs/providers.md`](../../docs/providers.md) — the skills call them by name, so
 an adapter that renames them will not work. Start by copying
 `hubspot-server.mjs`; the protocol half (framing, handshake, dispatch) is generic
@@ -188,6 +255,17 @@ printf '%s\n' \
 ```
 
 You should get two JSON frames on stdout — an `initialize` result naming
-protocol `2025-11-25`, and the eight tool descriptors — with all logging on
+protocol `2025-11-25`, and the twelve tool descriptors — with all logging on
 stderr. Add `HUBSPOT_ACCESS_TOKEN=...` and a `tools/call` frame to exercise a
-real read.
+real read:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"1"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"crm_get_pipelines","arguments":{}}}' \
+  | HUBSPOT_ACCESS_TOKEN=pat-... node runner/mcp/hubspot-server.mjs
+```
+
+`HUBSPOT_API_BASE_URL` points the adapter at a mock server instead, which is how
+the retry, error-mapping and deal-classification paths get exercised without a
+live portal.

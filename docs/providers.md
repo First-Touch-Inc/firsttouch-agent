@@ -29,9 +29,10 @@ sends. The agent never sends directly — it asks the outreach provider to creat
 something *pending*. If you swap this out, you are replacing the approval gate,
 so whatever you put there must have one.
 
-**The CRM is read-mostly.** The agent reads lists, contacts, companies, owners
-and activity from it. The bundled adapter can write exactly one thing — a
-property update — and refuses even that unless `CRM_WRITES_ENABLED=1`.
+**The CRM is read-mostly.** The agent reads lists, contacts, companies, deals,
+owners and activity from it. The bundled adapter can write exactly one thing — a
+property update on a contact or company — and refuses even that unless
+`CRM_WRITES_ENABLED=1`. Deals are read-only with no gate to open.
 
 ## Adding a CRM adapter
 
@@ -52,9 +53,29 @@ that renames them will not work:
 | `crm_get_company` | One company by id or domain |
 | `crm_search_contacts` | Filter-based contact search |
 | `crm_search_companies` | Filter-based company search |
+| `crm_search_deals` | Filter-based deal search — pipeline, stage, owner, amount, close date, and how long a deal has been quiet |
+| `crm_get_deal` | One deal by id, with its associated contact and company ids |
+| `crm_get_deals_for_contact` | A contact's deals, each open/won/lost — this is what the open-deal suppression check reads |
+| `crm_get_pipelines` | Pipelines and stages, with closed-won and closed-lost decoded, because stage ids are portal-specific |
 | `crm_get_owners` | Users who can own a record — used to route drafts |
 | `crm_get_contact_activity` | Recent engagements, so the agent can tell whether anyone followed up |
 | `crm_update_property` | The only write. Must stay behind `CRM_WRITES_ENABLED`. |
+
+The four deal tools are **read-only and must stay that way**. There is no gated
+deal write to port: moving a stage, or creating or closing a deal, is a sales
+decision, and an adapter that offers it hands an outbound agent the ability to
+rewrite a forecast.
+
+Two of them carry requirements a re-implementation is easy to get wrong:
+
+- **`crm_get_pipelines` must expose per-stage closed / won / lost semantics.**
+  Stage identifiers are portal-specific in every CRM worth adapting, so an agent
+  that cannot ask "is this stage a win?" ends up pattern-matching stage labels,
+  which fails the first time a customer renames one.
+- **`crm_get_deals_for_contact` must distinguish "no open deal" from "could not
+  tell".** It backs a suppression check, and reporting an unresolvable deal as
+  "not open" is what puts prospecting mail into an account that is mid-contract.
+  Return the uncertainty and let the agent fail safe.
 
 **2. Keep the failure messages diagnostic.** The model reads them and reports
 them to a human. Say *"the private app is missing the owners read scope"*, not

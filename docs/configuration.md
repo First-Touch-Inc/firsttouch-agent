@@ -355,7 +355,7 @@ sales-email-read
 | `crm.objects.owners.read` | `GET /crm/v3/owners`. This is the call `npm run preflight` makes, so a missing scope here shows up as `CRM token is missing a scope (403)` immediately. | **Yes** |
 | `crm.objects.contacts.read` | Contact properties and search — **and every engagement read**: notes, tasks, calls, emails and meetings. See the note below. | **Yes** |
 | `crm.objects.companies.read` | Company properties and search. Needed for `providers.crm.customer_signal` when your signal is a company property. | **Yes** |
-| `crm.objects.deals.read` | Deal properties and search. This is what backs the `"Contacts with an open deal"` suppression check. | **Yes** |
+| `crm.objects.deals.read` | Deal properties and search, **deal pipelines and their stages** (`GET /crm/v3/pipelines/deals`), and the contact→deal association. This is what backs the `"Contacts with an open deal"` suppression check and the stalled-deal follow-up. | **Yes** |
 | `crm.lists.read` | List definitions **and** memberships. Every `crm.list` bucket needs it. | **Yes** |
 | `sales-email-read` | The *content* of email engagements. Without it you get email metadata but not bodies — which means the `replies-no-followup` bucket cannot read the reply it is supposed to be following up on. | **Yes**, if you read replies |
 
@@ -369,6 +369,21 @@ timeline.
 Reading list *memberships* needs only `crm.lists.read` — memberships come back
 as record IDs. You need `crm.objects.contacts.read` separately to turn those IDs
 into people, which you are granting anyway.
+
+**The second thing that surprises people:** there is no `crm.pipelines.read`
+either. HubSpot publishes exactly two scope strings under "pipelines" —
+`crm.pipelines.orders.read` and `crm.pipelines.orders.write` — and both are for
+**order** pipelines in Commerce Hub. Deal pipelines and their stages are covered
+by `crm.objects.deals.read`, so granting an orders scope will not make
+`crm_get_pipelines` work. The agent needs that endpoint because deal stage IDs
+are portal-specific: without the pipeline definition there is no way to tell an
+open deal from a won one, which is exactly the distinction the open-deal
+suppression check depends on.
+
+Associations are also not separately scoped. Reading a contact's associated
+deals requires the scope for **both** ends —`crm.objects.contacts.read` *and*
+`crm.objects.deals.read` — so a `403` there can come from either, and the
+adapter names both in the error.
 
 ### Write scopes — only if you enable CRM writes
 
@@ -425,7 +440,12 @@ scope breakdown is in
 > [Owners API](https://developers.hubspot.com/docs/api-reference/latest/crm/owners/guide) ·
 > [Lists API](https://developers.hubspot.com/docs/api-reference/latest/crm/lists/guide) ·
 > [Activities/notes](https://developers.hubspot.com/docs/api-reference/latest/crm/activities/notes/get-notes) ·
-> [Contacts](https://developers.hubspot.com/docs/api-reference/latest/crm/objects/contacts/get-contacts).
+> [Contacts](https://developers.hubspot.com/docs/api-reference/latest/crm/objects/contacts/get-contacts) ·
+> [Deals API](https://developers.hubspot.com/docs/guides/api/crm/objects/deals) ·
+> [Deals search](https://developers.hubspot.com/docs/api-reference/legacy/crm/objects/deals/search/search-deals) ·
+> [Pipelines API](https://developers.hubspot.com/docs/guides/api/crm/pipelines) ·
+> [CRM Search limits](https://developers.hubspot.com/docs/api-reference/search/guide) ·
+> [Associations v4](https://developers.hubspot.com/docs/api-reference/crm-associations-v4/guide).
 > The v1 Lists API was sunset on 2026-04-30; this repo uses v3.
 
 ---
