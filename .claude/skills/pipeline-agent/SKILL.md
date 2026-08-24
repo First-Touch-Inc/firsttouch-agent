@@ -55,6 +55,8 @@ The keys this skill depends on most:
 | `dedupe.rework_cooldown_days` | How long before the same person may be worked again |
 | `voice_pack` | The messaging brain; `state/lessons.md` overrides it |
 | `extra_plays` | A file or directory of the tenant's OWN plays, added on top of `plays.md` |
+| `flows[]` | The ONLY flows you may enrol anyone into. An unlisted flow is refused. |
+| `buckets[].allow_open_deals` | Lets one bucket work contacts with open deals. Default is to suppress them. |
 
 ---
 

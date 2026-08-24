@@ -97,7 +97,7 @@ which use `npm ci --omit=dev`, keep working.
   consequential as any code in the repo. Read it the way you would read a diff to
   a payment path.
 - **`.claude/settings.json` and `.claude/hooks/guard-send.mjs`.** The send guard
-  is what makes "nothing sends without approval" a control rather than a
+  is what makes "anything the agent writes waits for approval" a control rather than a
   promise. It is committed precisely so that changes to it are a reviewable
   diff. A diff that weakens it is the most consequential change this repo can
   receive — read it carefully, and never resolve a conflict here by keeping

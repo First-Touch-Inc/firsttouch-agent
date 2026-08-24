@@ -2,7 +2,7 @@
 
 **A self-hosted sales agent that finds your warmest prospects each morning, writes the outreach, and hands it to a human to approve.**
 
-It sweeps the signals you already have — people engaging with your posts, visitors, cold signups, replies nobody followed up on — researches each person, drafts a personalized sequence in your voice, and puts it in an approval queue. **Nothing sends without a human clicking approve.**
+It sweeps the signals you already have — people engaging with your posts, visitors, cold signups, replies nobody followed up on — researches each person, drafts a personalized sequence in your voice, and puts it in an approval queue. **Anything it writes waits for a human to approve it.**
 
 You run it. Your keys, your infrastructure, your data.
 
@@ -26,7 +26,7 @@ Most "AI SDR" tools are a black box that sends on your behalf and burns your dom
 
 This is the opposite shape:
 
-- **Approval-first.** The agent drafts. A human decides. There is no autonomous send, and no config flag that turns one on.
+- **The agent never writes a message and sends it.** Anything it composes is approval-gated, and no config flag changes that. It *can* enrol qualified people into flows you wrote and published yourself — including flows with automated steps — because you approved that copy when you published it. It cannot author a flow, publish one, or enrol into a flow you did not declare.
 - **Warm before cold.** Buckets are worked in warmth order. Cold outbound is the fill of last resort, and it is gated: no researched, dated reason to contact someone means no draft, even if that means a short day.
 - **Yours.** Fork it, read every prompt, change anything. The agent's behavior lives in Markdown you can edit, not in a vendor's backend.
 - **Small attack surface.** It opens no ports and runs no server. It makes outbound calls and exits. There is nothing here for the internet to reach.
@@ -76,7 +76,9 @@ There are no silent defaults for anything tenant-specific. A missing owner id or
 
 This drafts messages to real people, to be sent under a real person's name. Read **[docs/safety-and-compliance.md](docs/safety-and-compliance.md)** before you go live.
 
-The approval gate is enforced in code, not asked for in a prompt. [`.claude/hooks/guard-send.mjs`](.claude/hooks/guard-send.mjs) blocks any tool call that would deliver a message directly, any action created without human approval required, and any action created without an explicit sender — because an action with no owner sends from whichever account the API token belongs to, and that cannot be undone. It is covered by tests; if you remove it, the paragraph at the top of this README stops being true.
+The gate is enforced in code, not asked for in a prompt. [`.claude/hooks/guard-send.mjs`](.claude/hooks/guard-send.mjs) blocks any tool that would deliver a message directly, any agent-composed action created without human approval required, and any action created without an explicit sender — an action with no owner sends from whichever account the API token belongs to, and that cannot be undone.
+
+It draws one deliberate line. **Composing is gated; enrolling is not.** A message the agent wrote is text no human has read, so it waits for approval. A flow is copy you wrote and published, so the agent may put a qualified person into it without re-approving your own words — but only into flows you list in `flows:`, and it may never create or publish one. That moves the human review earlier rather than removing it, which makes qualification and suppression the load-bearing checks on that path. Both halves are covered by tests.
 
 Defaults are conservative on purpose: supervised mode, a cap of 3, dry run on. Turn them up deliberately, after reading the output.
 

@@ -113,3 +113,84 @@ test('fails closed on an unparseable payload', () => {
 test('an unrelated tool is not blocked', () => {
   assert.equal(decide('Read', { file_path: 'x.md' }), null);
 });
+
+// --- flows vs dynamic actions ------------------------------------------------
+// A dynamic action is the agent composing a message nobody has read. A flow is
+// copy a human wrote and published, so enrolling a qualified person into one
+// does not need a second approval of that copy. The agent may decide WHO is in
+// a flow; it may never decide what a flow says or whether it goes live.
+
+import { writeFileSync as wf, rmSync as rm, existsSync as ex, readFileSync as rf } from 'node:fs';
+import { join as pj, dirname as pd } from 'node:path';
+
+const REPO = pj(pd(fileURLToPath(import.meta.url)), '..');
+const TENANT_CFG = pj(REPO, 'config', 'tenant.yaml');
+
+/** Put a config with one declared flow in place for the duration of a test. */
+function withFlows(ids, fn) {
+  const existed = ex(TENANT_CFG);
+  const backup = existed ? rf(TENANT_CFG, 'utf8') : null;
+  const flows = ids.length
+    ? 'flows:\n' + ids.map((id) => `  - id: "${id}"\n    name: "test"\n`).join('')
+    : 'flows: []\n';
+  wf(TENANT_CFG, `client:\n  name: "t"\n${flows}`);
+  try { return fn(); } finally {
+    if (existed) wf(TENANT_CFG, backup); else rm(TENANT_CFG, { force: true });
+  }
+}
+
+test('enrolling into a DECLARED flow is allowed without an approval flag', () => {
+  withFlows(['flow_ok_1'], () => {
+    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1', contactId: 'c1' });
+    assert.equal(d, null, 'a flow the operator declared must be enrollable');
+  });
+});
+
+test('enrolling into an UNDECLARED flow is blocked', () => {
+  withFlows(['flow_ok_1'], () => {
+    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_not_listed' });
+    assert.ok(denied(d));
+    assert.match(d.permissionDecisionReason, /not listed/i);
+  });
+});
+
+test('enrolling with no flow id named is blocked', () => {
+  withFlows(['flow_ok_1'], () => {
+    assert.ok(denied(decide('mcp__outreach__enroll_awaiting_flow_items', { audienceId: 'a1' })));
+  });
+});
+
+test('with no flows declared, enrolment is blocked entirely', () => {
+  withFlows([], () => {
+    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'anything' });
+    assert.ok(denied(d));
+  });
+});
+
+test('the agent may not author or publish a flow', () => {
+  withFlows(['flow_ok_1'], () => {
+    for (const tool of [
+      'mcp__outreach__create_flow_plan',
+      'mcp__outreach__update_flow_plan',
+      'mcp__outreach__manage_flow_publication',
+      'mcp__outreach__replace_flow_root',
+    ]) {
+      const d = decide(tool, { flowPlanId: 'flow_ok_1' });
+      assert.ok(denied(d), `${tool} must be blocked — publishing is a human's job`);
+    }
+  });
+});
+
+test('a dry run still blocks enrolment into a declared flow', () => {
+  withFlows(['flow_ok_1'], () => {
+    assert.ok(denied(decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1' }, { dryRun: true })));
+  });
+});
+
+test('flow enrolment does NOT relax the dynamic-action gate', () => {
+  withFlows(['flow_ok_1'], () => {
+    // The whole point of the split: one path loosened, the other unchanged.
+    assert.ok(denied(decide('mcp__outreach__add_dynamic_action', { ownerId: 'u1' })));
+    assert.ok(denied(decide('mcp__outreach__send_email', {})));
+  });
+});

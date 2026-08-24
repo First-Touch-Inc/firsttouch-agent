@@ -148,6 +148,9 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
 
       // A placeholder list id is the single most likely misconfiguration, and
       // the failure mode is working the wrong list of humans.
+      if (b.allow_open_deals !== undefined && typeof b.allow_open_deals !== 'boolean') {
+        problems.push(`bucket "${id}": allow_open_deals must be true or false.`);
+      }
       if (b.source?.type === 'crm.list' && isBlank(b.source?.list_id)) {
         problems.push(
           `bucket "${id}": source.list_id is still a placeholder. ` +

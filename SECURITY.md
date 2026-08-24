@@ -42,8 +42,13 @@ delete from it when someone asks you to. See
 The agent reads text written by people who are not you — profile bios, company
 websites, CRM notes. That text can contain instructions aimed at the model.
 
-The primary mitigation is structural rather than clever: **the agent cannot send
-anything.** Everything it produces waits for a human to approve it, so the worst
-realistic outcome of a successful injection is a bad draft that a person
-rejects. Keep it that way. The moment you automate approval, injected content
-becomes an action rather than a suggestion.
+The primary mitigation is structural rather than clever: **the agent cannot write
+a message and send it.** Anything it composes waits for a human, so the worst
+realistic outcome on that path is a bad draft someone rejects.
+
+The flow-enrolment path is the exception worth understanding. Injected text
+cannot change what gets *said* there — the copy is yours and was published before
+the run — but it could influence *who* gets enrolled. That is why enrolment is
+limited to flows you declare in `flows:`, why the agent may never author or
+publish a flow, and why suppression and qualification carry more weight on that
+path than on the drafting path. Keep the flow list short and specific.

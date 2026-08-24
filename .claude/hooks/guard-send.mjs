@@ -9,14 +9,18 @@
 // and guidance is not a control: a prompt can be misread, a model can be talked
 // out of it by injected text in a prospect's bio, and a future edit to a skill
 // can quietly drop the rule. This file is the actual guarantee. If the README
-// says nothing sends without approval, this is the reason that sentence is
-// allowed to be there.
+// says the agent never writes a message and sends it, this is the reason that
+// sentence is allowed to be there.
 //
 // It denies rather than asks, because there is no human at a terminal during a
 // scheduled run — an "ask" would hang the job until it timed out.
 //
 // Wired up in .claude/settings.json. Reads the hook payload on stdin and writes
 // a permission decision on stdout.
+
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
@@ -44,6 +48,39 @@ function deny(reason) {
     },
   }));
   process.exit(0);
+}
+
+/**
+ * Flow ids the operator declared in `flows:`. Read here rather than passed in,
+ * because a hook that trusts its own arguments for the allowlist is not a
+ * control — the point is that this cannot be talked out of the check.
+ *
+ * Returns a Set, or null when the config cannot be read at all (caller denies).
+ */
+function allowedFlowIds() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const root = resolve(here, '..', '..');
+    const tenant = process.env.TENANT || 'tenant';
+    const path = join(root, 'config', `${tenant}.yaml`);
+    if (!existsSync(path)) return new Set();
+
+    // Deliberately a line scan rather than a YAML parse: this hook must not
+    // depend on node_modules resolving from wherever the agent was launched.
+    const ids = new Set();
+    let inFlows = false;
+    for (const raw of readFileSync(path, 'utf8').split(/\r?\n/)) {
+      const line = raw.replace(/#.*$/, '');
+      if (/^flows\s*:/.test(line)) { inFlows = true; continue; }
+      if (inFlows && /^\S/.test(line)) break;          // dedented out of the block
+      if (!inFlows) continue;
+      const m = line.match(/^\s*-?\s*id\s*:\s*["']?([^"'\s]+)["']?\s*$/);
+      if (m) ids.add(m[1]);
+    }
+    return ids;
+  } catch {
+    return null;
+  }
 }
 
 function allow() {
@@ -82,11 +119,70 @@ if (dryRun && MUTATING.test(bareName)) {
   );
 }
 
+// --- 2b. Flows: the agent may enrol, but may not author or publish -----------
+// A flow's copy was written and published by a human, so enrolling a qualified
+// person into one does not need a second approval of that copy. Creating or
+// publishing a flow is the opposite: it is authoring content that will send
+// automatically, which is exactly the human's job.
+const FLOW_AUTHORING = /(^|_)(create_flow_plan|update_flow_plan|replace_flow_root|manage_flow_publication)(_|$)/i;
+
+if (FLOW_AUTHORING.test(bareName)) {
+  deny(
+    `Blocked by the send guard: "${toolName}" creates or publishes a flow. ` +
+    `The agent decides WHO belongs in a flow, never what a flow says or whether ` +
+    `it goes live — that copy sends automatically, so a human authors and ` +
+    `publishes it. Enrol into an already-published flow instead, or report this ` +
+    `as a blocker if no suitable flow exists.`,
+  );
+}
+
+const FLOW_ENROLLMENT = /(^|_)(add_manual_flow_enrollment|enroll_awaiting_flow_items|reenroll_flow_enrollments|attach_audience_to_flow)(_|$)/i;
+
+if (FLOW_ENROLLMENT.test(bareName)) {
+  // Only flows the operator declared. Without this, a misconfigured or
+  // misled run could drop someone into any campaign in the workspace — and
+  // unlike a dynamic action, nobody reads that message before it sends.
+  const allowed = allowedFlowIds();
+  const flat = JSON.stringify(input);
+
+  if (allowed === null) {
+    deny(
+      `Blocked by the send guard: could not read the tenant config to check which ` +
+      `flows are permitted, so enrolment is refused. Fix the config and retry.`,
+    );
+  }
+  if (allowed.size === 0) {
+    deny(
+      `Blocked by the send guard: no flows are declared in the tenant config, so ` +
+      `"${toolName}" has nothing it is permitted to enrol into. Either add the flow ` +
+      `under \`flows:\` in config/tenant.yaml, or create an approval-gated dynamic ` +
+      `action instead.`,
+    );
+  }
+  const referenced = [...flat.matchAll(/"(?:flow_?plan_?id|flowPlanId|flowId|flow_id)"\s*:\s*"([^"]+)"/gi)].map((m) => m[1]);
+  if (referenced.length === 0) {
+    deny(
+      `Blocked by the send guard: "${toolName}" was called without naming a flow id, ` +
+      `so the guard cannot check it against the permitted list. Pass the flow id explicitly.`,
+    );
+  }
+  const forbidden = referenced.filter((id) => !allowed.has(id));
+  if (forbidden.length) {
+    deny(
+      `Blocked by the send guard: flow ${forbidden.join(', ')} is not listed under \`flows:\` ` +
+      `in the tenant config. Permitted: ${[...allowed].join(', ')}. Enrolling into an ` +
+      `undeclared flow would send this person messages nobody chose for them.`,
+    );
+  }
+  // Permitted flow, real run — allowed through without an approval flag, by design.
+  allow();
+}
+
 // --- 3. Approval-gated creation must actually be approval-gated --------------
 // Creating an action with approval switched off produces something that sends
 // the moment it is created. Some platforms default this to false, so an omitted
 // flag is not safe to treat as "approval on".
-const CREATES_ACTION = /^mcp__outreach__(add_dynamic_action|create_.*action|enroll|add_manual_flow_enrollment)/i;
+const CREATES_ACTION = /^mcp__outreach__(add_dynamic_action|create_.*action)/i;
 
 if (CREATES_ACTION.test(toolName)) {
   const flat = JSON.stringify(input);

@@ -50,7 +50,7 @@ first one. Do that deliberately, and know exactly what is listening.
 
 ## The send guard
 
-The README says nothing sends without a human approving it.
+The README says the agent never writes a message and sends it.
 [`.claude/hooks/guard-send.mjs`](../.claude/hooks/guard-send.mjs) is the reason
 that sentence is allowed to be there.
 
@@ -61,7 +61,7 @@ it executes and returns a permission decision. It **denies** rather than asks,
 because during a scheduled run there is no human at a terminal — an "ask" would
 hang the job until it timed out.
 
-Four things it blocks:
+Six things it blocks:
 
 1. **Tools that deliver a message immediately.** Anything matching
    `send_*`, `*_send`, `*send_message`, `send_linkedin`, `send_email`,
@@ -77,6 +77,28 @@ Four things it blocks:
 4. **Action creation with no explicit owner.** Without one the platform assigns
    the action to whichever user the API token belongs to, so approving it sends
    from the wrong person's account — and that is not reversible.
+5. **Authoring or publishing a flow.** `create_flow_plan`, `update_flow_plan`,
+   `replace_flow_root` and `manage_flow_publication` are denied outright. A flow
+   sends on its own, so writing one and turning it on is a human's decision. The
+   agent decides who belongs in a flow, never what it says.
+6. **Enrolling into a flow you did not declare.** Enrolment is checked against
+   the `flows:` list in your tenant config, read by the hook itself rather than
+   passed to it. An unlisted flow id, or a call that names no flow at all, is
+   denied.
+
+### Why enrolment is treated differently
+
+Enrolling someone into a declared flow is allowed **without an approval flag**,
+and that is deliberate rather than an oversight. The two cases are not the same
+risk: a dynamic action is text the agent just wrote that nobody has read, while a
+flow is copy you wrote and published. Requiring you to re-approve your own
+published words per contact would be theatre.
+
+What it costs: on that path nobody reads the individual before messages start.
+The review moved earlier — to when you published the flow — so **qualification
+and suppression are the real controls there**, not the approval queue. Keep
+`flows:` short, keep the suppression list honest, and give a new flow a dry run
+before you list it.
 
 Two details worth understanding:
 

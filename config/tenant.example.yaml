@@ -162,6 +162,31 @@ buckets:
       - Use the actual reply and the length of the silence as the hook. Do not pretend the gap was deliberate.
       - If the thread context is too thin to write an honest follow-up, report it as a blocker instead of drafting something generic.
 
+  # PIPELINE FOLLOW-UP. The one bucket that is SUPPOSED to touch open deals.
+  #
+  # Everywhere else, a contact with an open deal is suppressed — prospecting
+  # into a live negotiation is the fastest way to undercut whoever is running
+  # it. Here that is the entire point, so this bucket opts out explicitly.
+  # The opt-out is per bucket and never global, so turning it on for pipeline
+  # work cannot leak into cold outbound.
+  - id: stalled-deals
+    enabled: false
+    priority: 3                 # warm — an existing conversation that went quiet
+    daily_cap: 5
+    source:
+      type: crm.deal_search
+      only_open: true
+      no_activity_days: 30      # nobody has touched it in this long
+      # pipeline: "<YOUR_PIPELINE_ID>"   # optional; omit to sweep every pipeline
+    play: stalled-deal-reactivation
+    allow_open_deals: true      # REQUIRED here. Without it the suppression check
+                                # would remove every candidate this bucket finds.
+    rules:
+      - Diagnose WHY it stalled before drafting. Read the deal's history and the last real exchange. A follow-up that ignores the reason reads as a nudge and gets treated as one.
+      - Route to the DEAL OWNER, not the default sender. Someone else's live opportunity is not yours to reopen.
+      - If the deal is closed-lost for a reason that has not changed, leave it alone and say so.
+      - Never mention the stall itself. "Circling back" and "just checking in" are what the silence was about.
+
   - id: stale-signups
     enabled: false
     priority: 4                 # warm — they signed up and never activated
@@ -189,6 +214,42 @@ buckets:
       - "Every draft needs a REAL, DATED reason found by research: a leader new in role (under 6 months), an open sales/RevOps req, a named tool in their stack, live ads, funding or a headcount jump in the last 6 months, genuine traction on a post, or existing history with you. Name the source and the date."
       - "BANNED as a reason: an analogy between what they sell and what you sell. Their marketing copy is a writing hook, not a reason to contact a human. So is headcount alone, their funding stage alone, or the fact that they are on the list."
       - "No reason found = DO NOT DRAFT. Move to the next account. If the list runs dry before the floor, report the shortfall along with how many accounts were researched and dropped. A short day beats a manufactured one — the floor is a target, never a licence to invent a why."
+
+# -----------------------------------------------------------------------------
+# FLOWS the agent may enrol people into.
+#
+# There are two different things the agent can do, and they carry different
+# risk, so they are gated differently:
+#
+#   A DYNAMIC ACTION is the agent composing a message to one specific person,
+#   right now. Nobody has read that text before. It ALWAYS requires human
+#   approval, and no setting here changes that.
+#
+#   A FLOW is a sequence YOU built and published. You wrote the copy and you
+#   decided which steps send automatically. The agent does not author it and
+#   cannot publish it — it only decides who belongs in it. Enrolling someone
+#   does not need a second approval of copy you already approved.
+#
+# So the human review moved earlier rather than disappearing: you approve the
+# MESSAGE when you publish the flow, and the agent's judgement is limited to
+# WHO gets enrolled. That makes qualification and suppression the load-bearing
+# checks for this path — an unsuppressed customer enrolled here gets real
+# messages with nobody reading them first.
+#
+# Only flows listed below can be enrolled into. An unlisted flow id is refused
+# by the send guard, so a misconfigured run cannot drop someone into an
+# unrelated campaign.
+#
+# Leave this empty and the agent works purely in approval-gated drafts.
+# -----------------------------------------------------------------------------
+flows: []
+  # - id: "flow_plan_xxxxxxxxxxxx"    # from your outreach platform
+  #   name: "Warm engager nurture"    # for the digest and the run report
+  #   play: engager-followup          # which play may enrol into it
+  #   automated_steps: true           # true = its steps send without further approval.
+  #                                   # Set honestly; it changes what the run report says
+  #                                   # and how the digest describes the day.
+  #   max_enrollments_per_day: 10     # counts toward caps.max_per_day like any other action
 
 # -----------------------------------------------------------------------------
 # Where drafts go for review. The outreach platform's task queue is ALWAYS the
@@ -282,7 +343,7 @@ suppression:
   - "Existing enrollments, live sequences, or queued actions on the outreach platform"
   - "Disqualified, bounced, unsubscribed, or previously-canceled rows"
   - "Existing customers, per providers.crm.customer_signal above"
-  - "Contacts with an open deal"
+  - "Contacts with an open deal — UNLESS the bucket sets allow_open_deals: true, which is how pipeline follow-up reaches its own candidates"
   - "Anyone on the exclusion list below"
   - "Any contact whose email domain OR company domain matches excluded_domains"
 
