@@ -1,0 +1,20 @@
+{
+  "name": "pipeline-agent",
+  "version": "0.1.0",
+  "description": "Self-hostable, approval-first pipeline agent. Researches your warm signals and target accounts daily, drafts personalized outreach, and routes every draft to a human for approval.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "preflight": "node runner/preflight.mjs",
+    "start": "node runner/run-daily.mjs",
+    "dry": "node runner/run-daily.mjs --dry",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.241",
+    "js-yaml": "^5.3.0"
+  }
+}

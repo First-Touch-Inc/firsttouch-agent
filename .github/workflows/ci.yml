@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Example config must be valid YAML and load
+        run: |
+          cp config/tenant.example.yaml config/tenant.yaml
+          # The unedited example MUST fail validation — it is full of
+          # placeholders, and a passing preflight here would mean the
+          # validator had stopped catching them.
+          if node runner/preflight.mjs --offline; then
+            echo "::error::The unedited example config passed preflight. Placeholder validation has regressed."
+            exit 1
+          fi
+          echo "Unedited example correctly rejected."
+          rm config/tenant.yaml
+
+      - name: Tests
+        run: npm test --if-present
+
+  # This repo was extracted from a private codebase. This job exists so that a
+  # future commit cannot quietly reintroduce a real person, customer, internal
+  # hostname or credential into a public repo.
+  no-secrets-or-pii:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credential patterns
+        run: |
+          set +e
+          PAT='xox[baprs]-[A-Za-z0-9-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|pat-(na|eu)[0-9]-[a-f0-9-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN[A-Z ]+PRIVATE KEY-----'
+          HITS=$(grep -rInE "$PAT" . \
+            --exclude-dir=.git --exclude-dir=node_modules \
+            --exclude=ci.yml)
+          if [ -n "$HITS" ]; then
+            echo "::error::Possible credential committed:"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "No credential patterns found."
+
+      - name: Real .env or token files must never be committed
+        run: |
+          set +e
+          BAD=$(git ls-files | grep -E '(^|/)\.env$|(^|/)\.env\.(local|production)$|-oauth\.json$|^state/' )
+          if [ -n "$BAD" ]; then
+            echo "::error::These files must not be tracked:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "No secret or state files tracked."
+
+      - name: Placeholders must stay placeholders
+        run: |
+          set +e
+          # Catch a real-looking id pasted into the example config, which is how
+          # a tenant's actual CRM list or user id would leak.
+          HITS=$(grep -nE '^\s*(list_id|provider_user_id|crm_owner_id):\s*"?[A-Za-z0-9_-]{6,}"?\s*$' \
+            config/tenant.example.yaml | grep -v '<' )
+          if [ -n "$HITS" ]; then
+            echo "::error::config/tenant.example.yaml contains what looks like a real id. Use a <PLACEHOLDER>:"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "Example config contains only placeholders."

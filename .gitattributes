@@ -1,0 +1,7 @@
+# Normalize line endings. Contributors will be on macOS, Linux and Windows, and
+# the shell scripts and Dockerfile break if they arrive with CRLF.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

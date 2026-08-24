@@ -1,0 +1,44 @@
+# Fly.io — a long-running machine that runs supercronic and nothing else.
+#
+# Fly has NO native cron. See docs/deploy-other.md for the three options and
+# why this one is the default here.
+#
+# THIS FILE REQUIRES A DOCKERFILE CHANGE. The repo's Dockerfile does not include
+# supercronic. Add it, and a crontab, before `fly deploy` — the exact lines are
+# in docs/deploy-other.md.
+#
+# Note there is no [http_service] and no [[services]] block. This app listens on
+# nothing. Do not add a port unless you know what would be behind it.
+
+app = "pipeline-agent"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  # supercronic reads a standard crontab and runs jobs in the foreground with
+  # real logging. The machine stays up; the runner starts, works and exits.
+  cron = "/usr/local/bin/supercronic /app/crontab"
+
+[env]
+  TENANT = "tenant"
+  STATE_DIR = "/data/state"
+  # supercronic honours TZ, so unlike Railway and Render you can schedule in
+  # local time and get DST handling for free.
+  TZ = "America/New_York"
+  # Remove this only after you have read a dry run's drafts.
+  DRY_RUN = "1"
+
+# Fly volumes are single-attach: one volume, one machine. Keep this app at one
+# machine (`fly scale count 1`) or the second machine gets no state and the
+# dedupe ledger diverges.
+[mounts]
+  source = "pipeline_state"
+  destination = "/data"
+  processes = ["cron"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  processes = ["cron"]

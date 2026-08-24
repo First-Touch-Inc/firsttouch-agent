@@ -1,0 +1,48 @@
+# Local and single-VPS self-hosting.
+#
+# Two ways to use this:
+#
+#   docker compose run --rm agent --dry     # one dry run, right now
+#   docker compose run --rm agent           # one real run, right now
+#   docker compose up -d scheduler          # run it every weekday morning
+#
+# Note there are no `ports:` here. This stack exposes nothing to the network —
+# the agent makes outbound calls only. If you ever add a port to this file, be
+# certain you know what is listening on it.
+
+services:
+  # One-shot. Does not stay running.
+  agent:
+    build: .
+    image: pipeline-agent
+    env_file: .env
+    environment:
+      STATE_DIR: /data/state
+    volumes:
+      - pipeline-state:/data
+      # Mount your config and voice pack read-only so a container cannot
+      # rewrite them, and so editing them locally takes effect immediately.
+      - ./config:/app/config:ro
+      - ./voice-pack.md:/app/voice-pack.md:ro
+
+  # Long-running scheduler. Uses the same image; the only difference is that it
+  # sleeps between runs. Prefer your platform's native cron if it has one —
+  # this exists for hosts that do not.
+  scheduler:
+    build: .
+    image: pipeline-agent
+    env_file: .env
+    environment:
+      STATE_DIR: /data/state
+      # Weekdays at 08:00 in the container's timezone.
+      CRON_SCHEDULE: "0 8 * * 1-5"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - pipeline-state:/data
+      - ./config:/app/config:ro
+      - ./voice-pack.md:/app/voice-pack.md:ro
+    command: ["node", "runner/scheduler.mjs"]
+    restart: unless-stopped
+
+volumes:
+  pipeline-state:

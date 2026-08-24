@@ -1,0 +1,345 @@
+# =============================================================================
+# Pipeline Agent — tenant configuration
+#
+# THIS FILE IS THE PRODUCT SURFACE. Onboarding a new team = writing one of
+# these. The agent reads it at the start of every run and does nothing that is
+# not described here.
+#
+# Copy it to `config/tenant.yaml` (gitignored) and edit. Never commit the copy:
+# keeping your config untracked is what lets you pull engine updates from
+# upstream forever without a merge conflict.
+#
+#   cp config/tenant.example.yaml config/tenant.yaml
+#
+# Or let the setup agent write it for you by interviewing you:
+#
+#   claude /setup
+#
+# NO SECRETS IN THIS FILE. API keys and tokens live in the environment only —
+# see .env.example. Anything here may end up in a log or a support ticket.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Who this agent works for.
+# -----------------------------------------------------------------------------
+client:
+  name: "Northwind Analytics"          # shown in digests and run reports
+  timezone: "America/New_York"         # IANA name; drives "today" and the schedule
+  approval_queue_url: "https://app.firsttouch.ai/tasks"   # where a human reviews drafts
+  digest:
+    slack_channel: "#pipeline-approvals"   # channel name or ID; where the daily digest lands
+    email: ""                              # optional; only used if approval_channels.email is true
+
+# -----------------------------------------------------------------------------
+# Providers — the two systems the agent actually operates.
+#
+# `outreach` executes the touches (and owns the approval queue).
+# `crm` is the source of truth for accounts, contacts and ownership.
+#
+# These are declared rather than assumed so the engine has one place to look,
+# and so a future adapter for a different vendor is a config change here rather
+# than a code change everywhere. Today `firsttouch` + `hubspot` are the
+# implemented pair; anything else will fail the preflight with a clear message
+# instead of half-working.
+# -----------------------------------------------------------------------------
+providers:
+  outreach:
+    kind: firsttouch                   # implemented: firsttouch
+    mcp_url: "https://mcp.firsttouch.ai"
+    # Auth is headless-first. Set FT_MCP_TOKEN in the environment for a static
+    # token, or leave it unset and authorize this deployment once in a browser
+    # at {HUB_URL}/oauth/start — it then refreshes itself indefinitely.
+  crm:
+    kind: hubspot                      # implemented: hubspot
+    # HUBSPOT_ACCESS_TOKEN (private-app token) in the environment.
+    # Required scopes are listed in docs/configuration.md.
+
+    # Property names the agent reads to detect an EXISTING CUSTOMER so it never
+    # prospects one. These are YOUR CRM's property names — there is no sensible
+    # default, and getting them wrong means writing to your own customers.
+    customer_signal:
+      # Suppress the account when any of these is true.
+      - property: ""                   # e.g. "active_seats" — a company property
+        operator: gte                  # eq | gte | lte | is_known | in
+        value: 1
+      # - property: "plan_tier"
+      #   operator: in
+      #   value: ["pro", "enterprise"]
+
+# -----------------------------------------------------------------------------
+# Volume. The agent never exceeds these, and it would rather run short than
+# manufacture filler to hit a number.
+# -----------------------------------------------------------------------------
+caps:
+  min_per_day: 10              # floor: keep sweeping buckets until this many drafts exist
+  max_per_day: 10              # ceiling: hard stop. Set equal to the floor for a fixed day.
+  enrichment_credits_per_run: 150   # soft ceiling on paid enrichment; stop enriching past it
+  supervised_run_cap: 3        # used only when run_mode is `supervised`
+  count_delegated_owners: true # do drafts routed to a teammate count toward the numbers above?
+
+run_mode: supervised           # supervised | daily
+                               # START ON `supervised`. It uses supervised_run_cap
+                               # instead of the caps above, so your first runs are
+                               # small enough to read every draft. Move to `daily`
+                               # once the output has earned it.
+
+# -----------------------------------------------------------------------------
+# Who you sell to. Free text — it is fed to the model as qualification context,
+# so write it the way you would brief a new rep. Be specific about who is NOT a
+# fit; that does more work than the inclusion criteria.
+# -----------------------------------------------------------------------------
+icp: >
+  B2B SaaS companies, roughly 50-500 employees, running an outbound sales
+  motion. Buyers are VP Sales, Head of Sales, CRO, Head of Sales Development,
+  RevOps, and Founder/CEO at the smaller end. Never individual AEs or SDRs —
+  they cannot buy. Not agencies, not staffing firms, not companies under 20
+  people.
+
+# Your messaging brain and play catalogue. Copy voice-pack.example.md to
+# voice-pack.md and fill it in — this is the single highest-leverage file for
+# output quality, and it stays untracked alongside your config.
+voice_pack: "voice-pack.md"
+extra_plays: ".claude/skills/pipeline-agent/plays.md"
+
+# -----------------------------------------------------------------------------
+# BUCKETS — the core abstraction.
+#
+# A bucket is one source of people plus the rules for working them. Every run
+# sweeps the enabled buckets in priority order (1 first), stops each at its own
+# daily_cap so a busy source cannot starve the others, and stops the whole run
+# at caps.max_per_day.
+#
+# Order them by WARMTH. Someone who raised their hand yesterday outranks a name
+# from a list, every time. Cold outbound belongs last: it is the fill of last
+# resort, not the opening move.
+#
+# Start with ONE warm bucket enabled. Add more once you trust the drafts.
+# -----------------------------------------------------------------------------
+buckets:
+
+  - id: social-engagers
+    enabled: true
+    priority: 1                 # hot — they engaged with your content in the last day
+    daily_cap: 4
+    source:
+      type: outreach.social_engagement
+      monitored_profiles: all-active     # or a list of profile handles you monitor
+    play: engager-followup
+    rules:
+      - Qualify against the ICP using the FREE engagement and profile data BEFORE paying for enrichment.
+      - Skip anyone already enrolled in any flow, or messaged before — check enrollment history, not just the current run.
+      - The engagement itself is the hook. Reference the specific post, not the fact that they clicked something.
+      - Signal feeds can be flaky. If the engager report errors or returns zero, fall back to the raw signal feed for the last 24h (48h after a weekend) before declaring the bucket empty.
+
+  - id: website-visitors
+    enabled: false
+    priority: 2                 # warm — intent shown on your site this week
+    daily_cap: 3
+    source:
+      type: crm.list
+      list_id: "<YOUR_VISITOR_LIST_ID>"
+    play: visitor-intent
+    rules:
+      - The company must be identified and ICP-plausible BEFORE spending enrichment credits.
+      - Read which pages they visited. Pricing and product pages outrank a blog post; a blog visit alone is not intent.
+      - Angle the message from what they looked at, without being creepy about it. Never say "I saw you visited".
+
+  - id: replies-no-followup
+    enabled: false
+    priority: 3                 # warm — they answered a human and nobody followed up
+    daily_cap: 3
+    source:
+      type: crm.list
+      list_id: "<YOUR_REPLIES_LIST_ID>"
+    play: reply-no-activity-followup
+    rules:
+      - Prioritize positive, curious or open-ended replies over brush-offs.
+      - Use the actual reply and the length of the silence as the hook. Do not pretend the gap was deliberate.
+      - If the thread context is too thin to write an honest follow-up, report it as a blocker instead of drafting something generic.
+
+  - id: stale-signups
+    enabled: false
+    priority: 4                 # warm — they signed up and never activated
+    daily_cap: 3
+    source:
+      type: crm.list
+      list_id: "<YOUR_SIGNUP_LIST_ID>"
+    play: signup-reactivation
+    rules:
+      - Signed up more than 14 days ago, with no open or won deal.
+      - Segment the message by how far they actually got in onboarding — a user who connected their CRM needs a different note than one who never logged in twice.
+
+  - id: target-accounts
+    enabled: false
+    priority: 9                 # COLD — always last. Fills whatever cap remains.
+    daily_cap: 10
+    source:
+      type: crm.list
+      list_id: "<YOUR_TARGET_ACCOUNT_LIST_ID>"
+    play: cold-outbound
+    rules:
+      # THE REASON GATE. This bucket has no inbound signal of its own, so the
+      # reason to write has to come out of research. This rule is the main thing
+      # standing between "personalized outbound" and spam.
+      - "Every draft needs a REAL, DATED reason found by research: a leader new in role (under 6 months), an open sales/RevOps req, a named tool in their stack, live ads, funding or a headcount jump in the last 6 months, genuine traction on a post, or existing history with you. Name the source and the date."
+      - "BANNED as a reason: an analogy between what they sell and what you sell. Their marketing copy is a writing hook, not a reason to contact a human. So is headcount alone, their funding stage alone, or the fact that they are on the list."
+      - "No reason found = DO NOT DRAFT. Move to the next account. If the list runs dry before the floor, report the shortfall along with how many accounts were researched and dropped. A short day beats a manufactured one — the floor is a target, never a licence to invent a why."
+
+# -----------------------------------------------------------------------------
+# Where drafts go for review. The outreach platform's task queue is ALWAYS the
+# source of truth; everything else is a mirror. The first decision from any
+# surface wins.
+# -----------------------------------------------------------------------------
+approval_channels:
+  slack: true
+  email: false
+  crm_task: false
+  # Public URL of your approval hub. Leave blank for a local-only run; the
+  # deploy sets it. The agent resolves the hub from HUB_URL first, then this.
+  public_base_url: ""
+
+# -----------------------------------------------------------------------------
+# OWNERSHIP — who each touch sends as.
+#
+# READ THIS EVEN IF YOU ARE A TEAM OF ONE. Every action must be created with an
+# explicit owner. If you omit the owner, the platform assigns the action to
+# whichever user the API is authenticated as — so approving it sends one
+# person's outreach from another person's account. That is unrecoverable after
+# the fact, and it is the single most damaging failure this system can produce.
+#
+# The engine therefore requires an owner on every action, verifies the owner
+# after creating it, and refuses to post the card if the check fails.
+#
+# `match` decides who gets the play when an account has history:
+#   default            — the fallback owner (exactly one owner must have this)
+#   prior_account_history — this owner had the account, the thread, or the connection
+# -----------------------------------------------------------------------------
+approval_routing:
+  owners:
+    - id: primary
+      name: "<Full Name>"
+      provider_user_id: "<OUTREACH_PLATFORM_USER_ID>"   # who the message sends AS
+      crm_owner_id: "<CRM_OWNER_ID>"                    # optional; used to match history
+      slack_channel: "#pipeline-approvals"
+      match: default
+
+    # - id: teammate
+    #   name: "<Full Name>"
+    #   provider_user_id: "<OUTREACH_PLATFORM_USER_ID>"
+    #   crm_owner_id: "<CRM_OWNER_ID>"
+    #   slack_channel: "<THEIR_APPROVAL_CHANNEL>"
+    #   match: prior_account_history
+
+# -----------------------------------------------------------------------------
+# The shape of every sequence.
+#
+# Channel order depends on whether the sender is ALREADY CONNECTED to the person
+# on LinkedIn. Resolve that before drafting — never send a connection request to
+# an existing connection, and never assume a connection you cannot verify.
+# -----------------------------------------------------------------------------
+sequence_defaults:
+  omni_channel: true
+
+  connection_check:
+    - "Check the outreach platform's saved connections for the sending account (1st-degree = connected)"
+    - "Check for an existing message thread or prior relationship on the contact record"
+    - "If status cannot be resolved, treat as NOT CONNECTED and use the not-connected order"
+
+  order_when_connected:
+    - linkedin_message_1       # the DM is the opener; it lands in a thread they already have
+    - email_1                  # different angle; says nothing about "connecting"
+    - linkedin_message_2       # short nudge on the existing thread
+
+  order_when_not_connected:
+    - email_1                  # sharpest hook
+    - email_2                  # different angle, not a "just bumping this"
+    - linkedin_connection_note # the connect request
+    - linkedin_message_1       # on accept: very short, references the email
+
+  rules:
+    - Emit drafts in SEND ORDER — the approval card renders them in the order posted, so it reads like the real sequence.
+    - Always include at least one follow-up. A single-touch plan needs a stated reason in the digest.
+    - The accepted-branch DM is the shortest message in the plan: introduce, reference the email in one clause, one soft line. 25-40 words.
+    - No email address and none findable = social only, whatever the order above says.
+    - Word caps apply to every step: under 60 words, target 35-50, follow-ups 25-40.
+
+# -----------------------------------------------------------------------------
+# Cross-bucket rules.
+# -----------------------------------------------------------------------------
+dedupe:
+  key: linkedin_url_or_email
+  rework_cooldown_days: 30     # never draft the same person twice inside this window
+
+# Ordered suppression checks. Every one runs BEFORE a draft is created — it is
+# far cheaper to skip someone than to explain a message you should not have sent.
+suppression:
+  - "Existing enrollments, live sequences, or queued actions on the outreach platform"
+  - "Disqualified, bounced, unsubscribed, or previously-canceled rows"
+  - "Existing customers, per providers.crm.customer_signal above"
+  - "Contacts with an open deal"
+  - "Anyone on the exclusion list below"
+  - "Any contact whose email domain OR company domain matches excluded_domains"
+
+# Hard domain block. Matched on DOMAIN, not display name — companies routinely
+# go by a shorter brand name than their CRM record. Use this for customers your
+# CRM lists cannot catch, partners, competitors, and your own domains.
+excluded_domains: []
+  # - domain: example.com
+  #   reason: existing customer
+  #   added: 2026-01-01
+
+# Individual opt-outs. One line per person: an email address or a profile URL.
+# Anyone here is never contacted again on any channel, in any run.
+#
+# Keep this file OUTSIDE state/ so that clearing run state cannot resurrect a
+# person who asked not to be contacted. Under GDPR the right to object to direct
+# marketing is absolute, and several regimes require you to honour an opt-out
+# within a fixed window — so this is a legal obligation, not a preference.
+# Suppress rather than delete: a deleted record gets re-added by the next sweep,
+# a suppressed one does not.
+do_not_contact: "do-not-contact.txt"
+
+# -----------------------------------------------------------------------------
+# Channel rate limits.
+#
+# These are separate from `caps` on purpose. `caps` is how much work the agent
+# does; this is how hard it leans on any one channel — which is what gets a
+# sending domain filtered or a social account restricted.
+#
+# The defaults are deliberately low. Social platforms in particular publish no
+# reliable public number, enforce silently, and restrict the ACCOUNT rather than
+# the tool. That account belongs to a real person on your team. Read
+# docs/safety-and-compliance.md before raising anything here.
+# -----------------------------------------------------------------------------
+limits:
+  email:
+    max_per_day: 20
+  social:
+    max_connection_requests_per_day: 10
+    max_connection_requests_per_week: 40
+    max_messages_per_day: 15
+  # Never contact more than this many people at the same company in one quarter.
+  # Prevents the pattern that reads to a buying committee as a spray.
+  max_contacts_per_company_per_quarter: 3
+  # Total touches one person may receive from you in a quarter, all channels.
+  max_touches_per_contact_per_quarter: 6
+
+# -----------------------------------------------------------------------------
+# Required in commercial email in most jurisdictions: a real postal address and
+# a working opt-out. The agent injects both into every email it drafts, and
+# refuses to draft email at all if they are blank.
+# -----------------------------------------------------------------------------
+sender_identity:
+  legal_entity_name: ""
+  postal_address: ""            # a real mailing address, required by CAN-SPAM
+  unsubscribe_url: ""           # must work, and must be honoured promptly
+  privacy_notice_url: ""        # where you tell people how you got their data
+
+# -----------------------------------------------------------------------------
+# Run artifacts. Both are gitignored. On an ephemeral host (Railway, Fly,
+# Render) these live on the mounted volume — see docs/deploy-railway.md — or
+# they are lost between runs, which breaks dedupe and the cooldown window.
+# -----------------------------------------------------------------------------
+state:
+  ledger: "state/ledger.jsonl"     # one line per person worked: who, bucket, when, run id
+  run_reports: "state/runs/"       # one JSON report per run

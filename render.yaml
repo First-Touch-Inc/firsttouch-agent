@@ -1,0 +1,54 @@
+# Render Blueprint — one scheduled run per weekday.
+#
+# Render has a native cron service type. The command must EXIT; Render treats a
+# cron job as finished when the process does. `node runner/run-daily.mjs` exits
+# on its own and has a hard timeout (RUN_TIMEOUT_MS, default 45 minutes).
+#
+# Schedules are UTC. There is no timezone field and no DST handling — "0 12"
+# is 08:00 New York in summer and 07:00 in winter.
+#
+# CAVEAT, read docs/deploy-other.md before using this: Render's persistent disks
+# attach to web and private services, not to cron jobs. That means state/ is
+# EPHEMERAL here, so the dedupe ledger and the rework cooldown reset between
+# runs and the same people can be contacted twice. Either verify current disk
+# support for cron services in Render's docs, or point state at durable storage
+# yourself before going past a dry run.
+#
+# Render bills a per-cron-service monthly minimum. See https://render.com/pricing
+
+services:
+  - type: cron
+    name: pipeline-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: node runner/run-daily.mjs
+
+    # Weekdays at 12:00 UTC.
+    schedule: "0 12 * * 1-5"
+
+    region: oregon
+    # plan: starter          # check current plan names at render.com/pricing
+
+    envVars:
+      - key: TENANT
+        value: tenant
+
+      # No persistent disk on a cron service — see the caveat above.
+      - key: STATE_DIR
+        value: /app/state
+
+      # Start here. Remove it (or set 0) only after reading a dry run's drafts.
+      - key: DRY_RUN
+        value: "1"
+
+      # sync: false means "prompt me in the dashboard, do not store in git".
+      # Never put a real secret in this file.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FT_MCP_TOKEN
+        sync: false
+      - key: HUBSPOT_ACCESS_TOKEN
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false

@@ -1,0 +1,49 @@
+# =============================================================================
+# YOUR configuration and YOUR data stay out of git.
+#
+# This is deliberate and load-bearing. Keeping your tenant config, voice pack
+# and run state untracked is what lets you pull engine updates from upstream
+# forever without ever hitting a merge conflict:
+#
+#   git remote add upstream https://github.com/First-Touch-Inc/firsttouch-pipeline-agent.git
+#   git pull upstream main
+#
+# See docs/upgrading.md.
+# =============================================================================
+
+# --- Secrets. Never commit these. -------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-oauth.json
+oauth.json
+credentials.json
+secrets.*
+
+# --- Your tenant configuration (the .example files ARE tracked) -------------
+config/tenant.yaml
+config/*.local.yaml
+voice-pack.md
+
+# Contains the personal data of people who asked not to be contacted. Keep it,
+# back it up, and mount it into your container — but do not publish it.
+do-not-contact.txt
+
+# --- Run state: contains real prospect PII. Never commit. -------------------
+state/
+!state/.gitkeep
+
+# --- Machine-local Claude settings ------------------------------------------
+.claude/settings.local.json
+
+# --- Standard --------------------------------------------------------------
+node_modules/
+npm-debug.log*
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+.venv/

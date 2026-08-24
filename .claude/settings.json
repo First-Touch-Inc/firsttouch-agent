@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "//": [
+    "Committed on purpose. Everyone who clones this repo gets the same safety",
+    "controls, and changing them is a reviewable diff rather than a local",
+    "setting nobody sees.",
+    "",
+    "The PreToolUse hook below is what makes the README's claim true: the agent",
+    "cannot send to a prospect without a human approving first. Enforced here in",
+    "code rather than asked for in a prompt, because a prompt is guidance and a",
+    "hook is a control. Removing it does not just relax a default — it makes the",
+    "project's central promise false. See .claude/hooks/guard-send.mjs."
+  ],
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__outreach__.*|mcp__crm__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-send.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+
+  "permissions": {
+    "deny": [
+      "Bash",
+      "WebFetch(domain:localhost)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./*-oauth.json)"
+    ]
+  }
+}
