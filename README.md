@@ -48,13 +48,13 @@ This is the opposite shape:
                     Slack digest (posted, never listens)
 ```
 
-The runner is ~200 lines that loads config, checks credentials, and hands off to a headless [Claude Code](https://claude.com/claude-code) session. The judgement lives in [`.claude/skills/pipeline-agent/SKILL.md`](.claude/skills/pipeline-agent/SKILL.md) — plain Markdown, version controlled, yours to edit.
+The runner is ~200 lines that loads config, checks credentials, and hands off to a headless [Claude Code](https://claude.com/claude-code) session. That is the only supported harness, and deliberately so: the approval gate is a Claude Code pre-tool hook, and a plain model loop has no point at which anything but the model can say no. [docs/security.md](docs/security.md) explains what was evaluated and why. The judgement lives in [`.claude/skills/pipeline-agent/SKILL.md`](.claude/skills/pipeline-agent/SKILL.md) — plain Markdown, version controlled, yours to edit.
 
 ## What you need
 
 | | |
 |---|---|
-| **Model access** | An Anthropic API key, or an existing Claude subscription via `claude setup-token` |
+| **Model access** | An Anthropic API key, or an existing Claude subscription via `claude setup-token`. Subscription limits are not built for continuous automation — check your plan before scheduling it. |
 | **Outreach platform** | [FirstTouch](https://www.firsttouch.com) — executes touches and owns the approval queue |
 | **CRM** | HubSpot private-app token |
 | **Slack** *(optional)* | A bot token with `chat:write` for the daily digest |

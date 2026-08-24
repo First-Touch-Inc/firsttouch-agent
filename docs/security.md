@@ -48,6 +48,38 @@ The entire class of "someone on the internet reaches your deployment" is absent.
 The corollary is that if you add a port to any of these files, you are adding the
 first one. Do that deliberately, and know exactly what is listening.
 
+## Why headless Claude Code is the only supported harness
+
+This is a safety decision, not a limit of ambition, and it is worth stating
+because "swap in a different model runner" looks like a small change and is not.
+
+The approval gate is a Claude Code `PreToolUse` hook. It is the thing that makes
+the guarantee below a property of the system rather than a request in a prompt.
+Any replacement harness has to be able to do the same job: see a tool call
+BEFORE it executes, and refuse it. A plain model loop over an API cannot — there
+is no point at which something other than the model gets to say no.
+
+Two harnesses were evaluated properly rather than dismissed:
+
+- **OpenAI Codex CLI** can do it. Its `PreToolUse` hook does fire before MCP tool
+  calls, uses the same `mcp__server__tool` naming, and accepts the same deny
+  payload, so this guard would port with small changes. It was not adopted for a
+  specific reason: a hook that has not been *trusted* fails **open and silently**
+  in headless mode — no warning, no error, the tool runs and the model reports
+  success. Trust is granted through an interactive command a scheduled job never
+  sees. For software people clone and wire to their own cron, that turns "forgot
+  one setup step" into a total, invisible loss of the safety control. It is
+  fixable with managed hooks, and if someone needs Codex that is the only
+  acceptable way to do it.
+- **ChatGPT** cannot, for a cleaner reason. Workspace Agents genuinely do run on
+  a schedule, so scheduling was never the obstacle. The obstacle is that the only
+  route to unattended write actions is setting approvals to "never ask", which
+  deletes the gate rather than automating it.
+
+If you fork this and change the harness, port `test/guard-send.test.mjs` and make
+it pass. If you cannot, you have removed the control and the claims in this
+document no longer describe your deployment.
+
 ## The send guard
 
 The README says the agent never writes a message and sends it.

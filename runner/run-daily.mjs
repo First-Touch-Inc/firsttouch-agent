@@ -11,9 +11,19 @@
 //   node runner/run-daily.mjs --dry           # research and draft, create nothing
 //
 // The agent is spawned as a subprocess rather than embedded so that the run is
-// observable (streamed events), killable (hard timeout), and swappable — if you
-// would rather drive it with your own loop, replace `spawnAgent` and leave the
-// rest of this file alone.
+// observable (streamed events) and killable (hard timeout).
+//
+// HEADLESS CLAUDE CODE IS THE ONLY SUPPORTED HARNESS, and that is a safety
+// decision rather than a limit of ambition. The approval gate is a Claude Code
+// PreToolUse hook (.claude/hooks/guard-send.mjs), which inspects every outreach
+// and CRM tool call BEFORE it executes and can refuse it. Swap this out for a
+// plain model loop and that hook stops running — the gate silently becomes a
+// sentence in a prompt asking the model nicely, which is not a control.
+//
+// If you replace `spawnAgent`, you are taking ownership of the gate. Whatever
+// you put here must be able to block a tool call before it happens, and you
+// should port test/guard-send.test.mjs to prove it still does. See
+// docs/security.md.
 
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
@@ -147,9 +157,12 @@ function buildPrompt() {
       ? `DRY RUN. Research, qualify and draft normally, but create NOTHING in the ` +
         `outreach platform or the CRM, and post no digest. Write the drafts you ` +
         `would have created into the run report so a human can read them.`
-      : `Everything is draft-and-approve. Every action you create must be ` +
-        `approval-gated and assigned to an explicit owner from ` +
-        `approval_routing.owners. Nothing sends to a prospect without a human approving it.`,
+      : `Anything YOU compose is draft-and-approve: every action you create must be ` +
+        `approval-gated and assigned to an explicit owner from approval_routing.owners. ` +
+        `You may enrol a qualified person into a flow listed under \`flows:\` without ` +
+        `a further approval — that copy was written and published by a human — but you ` +
+        `may never author or publish a flow, and suppression must pass first, because ` +
+        `on that path nobody reads the message before it sends.`,
     ``,
     `Stop at ${cfg.__meta.effectiveCap} drafts. If the enabled buckets run dry before that, ` +
     `stop and report the shortfall with the per-bucket reason. Do not pad the run.`,
