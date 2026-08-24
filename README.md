@@ -18,6 +18,8 @@ npm run dry                   # a full run that creates nothing
 
 Read the drafts from `npm run dry`. When you would send them under your own name, schedule it — [Railway](docs/deploy-railway.md), [Docker, Render, Fly, or a VPS](docs/deploy-other.md).
 
+Optionally, `npm run chat` lets you ask it things in Slack — what it drafted today, why it skipped an account, go run one now.
+
 ---
 
 ## Why this exists
@@ -29,7 +31,7 @@ This is the opposite shape:
 - **The agent never writes a message and sends it.** Anything it composes is approval-gated, and no config flag changes that. It *can* enrol qualified people into flows you wrote and published yourself — including flows with automated steps — because you approved that copy when you published it. It cannot author a flow, publish one, or enrol into a flow you did not declare.
 - **Warm before cold.** Buckets are worked in warmth order. Cold outbound is the fill of last resort, and it is gated: no researched, dated reason to contact someone means no draft, even if that means a short day.
 - **Yours.** Fork it, read every prompt, change anything. The agent's behavior lives in Markdown you can edit, not in a vendor's backend.
-- **Small attack surface.** It opens no ports and runs no server. It makes outbound calls and exits. There is nothing here for the internet to reach.
+- **Small attack surface.** It binds no port and runs no server. Even real-time chat dials *out* to Slack rather than listening, so there is nothing here for the internet to reach.
 
 ## How it works
 
@@ -47,6 +49,13 @@ This is the opposite shape:
                             ▼
                     Slack digest (posted, never listens)
 ```
+
+It runs two ways, and they share everything that matters — the same skills, the same MCP servers, the same send guard:
+
+| | |
+|---|---|
+| `npm start` | One scheduled cycle. Wakes, works, exits. This is the cron job. |
+| `npm run chat` | Long-running. Answers questions in Slack over Socket Mode, and can kick off a run. Reads and drafts; never sends, never writes CRM, never touches the repo. |
 
 The runner is ~200 lines that loads config, checks credentials, and hands off to a headless [Claude Code](https://claude.com/claude-code) session. That is the only supported harness, and deliberately so: the approval gate is a Claude Code pre-tool hook, and a plain model loop has no point at which anything but the model can say no. [docs/security.md](docs/security.md) explains what was evaluated and why. The judgement lives in [`.claude/skills/pipeline-agent/SKILL.md`](.claude/skills/pipeline-agent/SKILL.md) — plain Markdown, version controlled, yours to edit.
 

@@ -245,3 +245,37 @@ test('extra_plays pointing at a single file loads that file', () => {
     rmSync(f, { force: true });
   }
 });
+
+// --- chat --------------------------------------------------------------------
+// The dangerous case is an enabled chat agent with an empty allowlist: it would
+// answer whoever finds the channel. That must be an error, not a default.
+
+test('chat enabled with an empty allowlist is rejected', () => {
+  const p = problemsFrom((c) => { c.chat = { enabled: true, allowed_users: [] }; });
+  assert.match(p, /allowed_users is empty/);
+  assert.match(p, /nobody/);
+});
+
+test('chat disabled needs no allowlist', () => {
+  const cfg = loadWith((c) => { c.chat = { enabled: false, allowed_users: [] }; });
+  assert.equal(cfg.chat.enabled, false);
+});
+
+test('chat rejects display names where Slack IDs are required', () => {
+  const p = problemsFrom((c) => { c.chat = { enabled: true, allowed_users: ['@jared'] }; });
+  assert.match(p, /not a Slack user ID/);
+});
+
+test('chat rejects #channel-name where a channel ID is required', () => {
+  const p = problemsFrom((c) => {
+    c.chat = { enabled: true, allowed_users: ['U01234ABCDE'], allowed_channels: ['#general'] };
+  });
+  assert.match(p, /not a Slack channel ID/);
+});
+
+test('a correctly configured chat block passes', () => {
+  const cfg = loadWith((c) => {
+    c.chat = { enabled: true, allowed_users: ['U01234ABCDE'], allowed_channels: ['C01234ABCDE'] };
+  });
+  assert.equal(cfg.chat.allowed_users.length, 1);
+});

@@ -216,6 +216,41 @@ buckets:
       - "No reason found = DO NOT DRAFT. Move to the next account. If the list runs dry before the floor, report the shortfall along with how many accounts were researched and dropped. A short day beats a manufactured one — the floor is a target, never a licence to invent a why."
 
 # -----------------------------------------------------------------------------
+# CHAT — ask the agent things in Slack, in real time.
+#
+# The scheduled run goes one direction: it wakes, works, exits. This is the
+# other. `npm run chat` is a long-running process that answers questions about
+# today's pipeline, explains why someone was skipped, and can kick off a run.
+#
+# It uses Slack Socket Mode, which means it dials OUT to Slack over a WebSocket.
+# It opens no port and has no public URL, so it keeps the property that nothing
+# on the internet can reach your deployment. It needs SLACK_APP_TOKEN (xapp-…)
+# in addition to SLACK_BOT_TOKEN — see .env.example.
+#
+# What chat can do: read your config, state and CRM, and create approval-gated
+# drafts. What it cannot do: send anything, write to the CRM, edit this repo, or
+# run shell commands. The same send guard applies as in a scheduled run.
+# -----------------------------------------------------------------------------
+chat:
+  enabled: false
+
+  # WHO may talk to it. Slack user IDs (Uxxxxxxxx), not display names.
+  # An EMPTY list means nobody — never everybody. The agent refuses to start
+  # with an empty list rather than answering whoever finds the channel.
+  #
+  # These are checked against Slack's own authenticated event, not against
+  # anything the sender supplies, so this is a real control.
+  allowed_users: []
+    # - "U01234ABCDE"
+
+  # WHERE it will answer. Channel IDs. Leave empty to allow any channel the bot
+  # has been invited to. Direct messages from an allowed user always work.
+  allowed_channels: []
+
+  max_concurrent: 2          # simultaneous questions before it asks you to wait
+  turn_timeout_ms: 480000    # 8 minutes, then it stops and says so
+
+# -----------------------------------------------------------------------------
 # FLOWS the agent may enrol people into.
 #
 # There are two different things the agent can do, and they carry different
@@ -262,8 +297,9 @@ approval_channels:
   crm_task: false
   # NOTE: these are one-way NOTIFICATION channels, not approval surfaces.
   # Approving happens in the outreach platform's task queue, which is the source
-  # of truth. This agent opens no port and receives nothing back — so there is no
-  # callback URL to configure here, by design. See docs/security.md.
+  # of truth. A scheduled run opens no port and receives nothing back, so there
+  # is no callback URL to configure here, by design. Real-time questions are a
+  # separate opt-in process — see the `chat:` block above. See docs/security.md.
 
 # -----------------------------------------------------------------------------
 # OWNERSHIP — who each touch sends as.

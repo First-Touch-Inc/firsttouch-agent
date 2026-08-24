@@ -331,8 +331,10 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
   dynamic actions, the approval task queue.
 - CRM API — list membership, contact and company properties, activity timeline.
 - Web search — free signal research.
-- Slack — optional, outbound only, one digest per run. This run opens no port and
-  receives nothing; approvals live in the platform's task queue.
+- Slack — optional, one digest per run, posted outbound. A scheduled run opens no
+  port and receives nothing; approvals live in the platform's task queue.
+  (`npm run chat` is a separate long-running process for real-time questions. It
+  is not part of this run.)
 - Optional third-party research APIs (ad libraries, post-reaction lookups) keyed
   by env vars. These are optional by design: several such providers only cover a
   fraction of profiles and return empty or error for the rest. Treat an empty

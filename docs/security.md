@@ -45,8 +45,36 @@ no password reset flow, and no authorization logic to get wrong.
 **Net result:** there is no unauthenticated endpoint anywhere in this system.
 The entire class of "someone on the internet reaches your deployment" is absent.
 
-The corollary is that if you add a port to any of these files, you are adding the
-first one. Do that deliberately, and know exactly what is listening.
+### Real-time chat does not change that
+
+`npm run chat` is long-running, which usually implies a listener. It does not
+have one. It uses **Slack Socket Mode**: the process dials OUT to Slack over a
+WebSocket and Slack pushes events down that connection. No port is bound, no
+public URL exists, and nothing is routable to your deployment.
+
+That choice is about more than avoiding a firewall rule. With a webhook, the
+sender's identity arrives inside the request body, so an allowlist that checks it
+is checking a value the caller supplied — which is exactly how a chat endpoint
+ends up executing instructions from whoever found the URL. Over Socket Mode the
+user and channel come from Slack's own envelope, on a socket that only your
+app-level token can open, so `chat.allowed_users` is a real control.
+
+Chat is also given less power than the scheduled run, not more:
+
+| | Scheduled run | Chat |
+|---|---|---|
+| Create approval-gated drafts | yes | yes |
+| Read config, state, CRM | yes | yes |
+| Write CRM properties | behind `CRM_WRITES_ENABLED` | never (forced off) |
+| `Bash`, `Write`, `Edit` | denied | denied |
+| Send anything | never | never |
+
+The send guard applies to both, unchanged. An empty `chat.allowed_users` means
+**nobody** — the process refuses to start rather than answering anyone who finds
+the channel, and preflight rejects the config before that.
+
+The corollary still holds: if you add a port to any file in this repo, you are
+adding the first one. Do that deliberately, and know exactly what is listening.
 
 ## Why headless Claude Code is the only supported harness
 

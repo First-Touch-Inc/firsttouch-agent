@@ -44,5 +44,20 @@ services:
     command: ["node", "runner/scheduler.mjs"]
     restart: unless-stopped
 
+  # Real-time Slack chat. Long-running, but still opens NO port — it dials out
+  # to Slack over a WebSocket. Note there is no `ports:` entry here either.
+  chat:
+    build: .
+    image: pipeline-agent
+    env_file: .env
+    environment:
+      STATE_DIR: /data/state
+    volumes:
+      - pipeline-state:/data
+      - ./config:/app/config:ro
+      - ./voice-pack.md:/app/voice-pack.md:ro
+    command: ["node", "runner/chat.mjs"]
+    restart: unless-stopped
+
 volumes:
   pipeline-state:

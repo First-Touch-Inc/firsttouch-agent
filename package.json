@@ -11,7 +11,8 @@
     "preflight": "node runner/preflight.mjs",
     "start": "node runner/run-daily.mjs",
     "dry": "node runner/run-daily.mjs --dry",
-    "test": "node --test"
+    "test": "node --test",
+    "chat": "node runner/chat.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.241",

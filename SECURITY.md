@@ -14,11 +14,19 @@ do with it. We will acknowledge within three business days.
 Deliberately, nothing.
 
 This agent runs as a scheduled job that starts, makes outbound calls, and exits.
-It **listens on no port, exposes no HTTP endpoint, receives no webhooks, and
-serves no dashboard.** There is no inbound surface to authenticate, and
-therefore no unauthenticated endpoint to find. If you ever add a listener, you
-are taking on an authentication problem this design does not currently have —
-read [docs/security.md](docs/security.md) before you do.
+It **binds no port, exposes no HTTP endpoint, receives no webhooks, and serves
+no dashboard.** There is no inbound surface to authenticate, and therefore no
+unauthenticated endpoint to find.
+
+That holds for real-time chat too. `npm run chat` is long-running, but it dials
+OUT to Slack over a WebSocket (Socket Mode) rather than accepting connections, so
+there is still nothing routable to your deployment — and the caller's identity
+comes from Slack's authenticated envelope rather than from a request body, which
+is what makes its allowlist meaningful.
+
+If you ever add an actual listener, you are taking on an authentication problem
+this design does not currently have — read [docs/security.md](docs/security.md)
+before you do.
 
 ## Your credentials
 

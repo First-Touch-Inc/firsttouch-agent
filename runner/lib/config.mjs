@@ -193,6 +193,31 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
     }
   }
 
+  // --- chat -----------------------------------------------------------------
+  // Only validated when enabled. The failure that matters is an enabled chat
+  // agent with an empty allowlist, which would answer anyone who finds the
+  // channel — so that is an error, never a permissive default.
+  if (cfg.chat?.enabled) {
+    const users = cfg.chat.allowed_users;
+    if (!Array.isArray(users) || users.filter((u) => !isBlank(u)).length === 0) {
+      problems.push(
+        'chat.enabled is true but chat.allowed_users is empty. An empty allowlist means ' +
+        'nobody, and the agent refuses to start rather than answering whoever finds the ' +
+        'channel. Add the Slack user IDs (Uxxxxxxxx) who may talk to it.',
+      );
+    }
+    for (const u of users || []) {
+      if (!isBlank(u) && !/^U[A-Z0-9]{6,}$/i.test(String(u))) {
+        problems.push(`chat.allowed_users entry "${u}" is not a Slack user ID. Use the Uxxxxxxxx form, not a display name.`);
+      }
+    }
+    for (const c of cfg.chat.allowed_channels || []) {
+      if (!isBlank(c) && !/^[CGD][A-Z0-9]{6,}$/i.test(String(c))) {
+        problems.push(`chat.allowed_channels entry "${c}" is not a Slack channel ID. Use the Cxxxxxxxx form, not #name.`);
+      }
+    }
+  }
+
   // --- suppression ----------------------------------------------------------
   if (!Array.isArray(cfg.suppression) || cfg.suppression.length === 0) {
     problems.push('suppression must list at least one check. Removing all of them means prospecting your own customers.');
@@ -324,6 +349,15 @@ export function checkEnvironment({ dryRun = false } = {}) {
     detail: has('HUBSPOT_ACCESS_TOKEN')
       ? 'HUBSPOT_ACCESS_TOKEN is set'
       : 'HUBSPOT_ACCESS_TOKEN is not set. Required to read lists, contacts and ownership.',
+  });
+
+  checks.push({
+    key: 'Slack chat (Socket Mode)',
+    ok: has('SLACK_APP_TOKEN') && has('SLACK_BOT_TOKEN'),
+    fatal: false,
+    detail: has('SLACK_APP_TOKEN')
+      ? (has('SLACK_BOT_TOKEN') ? 'SLACK_APP_TOKEN and SLACK_BOT_TOKEN are set' : 'SLACK_APP_TOKEN is set but SLACK_BOT_TOKEN is not — chat needs both.')
+      : 'SLACK_APP_TOKEN not set. Only needed for `npm run chat`; the scheduled run does not use it.',
   });
 
   checks.push({
