@@ -33,16 +33,29 @@ on this software.
 
 ## The approval gate
 
-**Every prospect-facing message this agent produces stops in a human queue.**
-Someone reads it and clicks approve before it reaches anyone. There is no
-autonomous send and no configuration flag that creates one.
+**Every message this agent composes stops in a human queue.** Someone reads it
+and clicks approve before it reaches anyone. No configuration flag changes that.
+
+There is one deliberate exception, and you should understand it before you enable
+it. If you list a flow under `flows:` in your config, the agent may enrol a
+qualified person into that flow without a further approval — because **you** wrote
+that copy and **you** published it, so the human review happened at publication
+rather than per contact. The agent cannot author a flow, cannot publish one, and
+cannot enrol into a flow you did not list. Leave `flows:` empty and the agent
+works purely in approval-gated drafts.
+
+The trade is worth naming plainly: on the flow path nobody reads the individual
+before messages start going out. **Qualification and suppression are the controls
+there**, not the queue. Keep the flow list short, and give a new flow a dry run
+before you list it.
 
 That is not a default. It is enforced in three places:
 
 1. **[`.claude/hooks/guard-send.mjs`](../.claude/hooks/guard-send.mjs)** — a
    `PreToolUse` hook that denies any tool call which would deliver a message
-   directly, any action created without the human-approval flag set to true, and
-   any action created without an explicit owner. It fails closed, and it denies
+   directly, any agent-composed action created without the human-approval flag
+   set to true, any action created without an explicit owner, any attempt to
+   author or publish a flow, and any enrolment into a flow you did not declare. It fails closed, and it denies
    rather than asks, because during a scheduled run there is no human at a
    terminal to answer. See [security.md](security.md#the-send-guard).
 2. **The runner's tool allowlist** — `--allowedTools` grants the outreach and CRM
@@ -278,17 +291,33 @@ differently, and the ePrivacy Regulation that was meant to harmonise this was
 **withdrawn by the Commission in October 2025**. The fragmentation is the settled
 state of affairs, not a transitional one.
 
-Four examples, to show the spread:
+Two consequences follow, and only the first is something this document can
+settle for you.
 
-| Country | Cold B2B email | Note |
-|---|---|---|
-| **Germany** | **Consent required** | UWG § 7(2) Nr. 2 requires prior express consent for email advertising. The statute distinguishes business recipients for *telephone* marketing and pointedly does not for email. Enforced through competition law, so competitors and trade associations can act — faster than a regulator. |
-| **France** | **Opt-out permitted** | Per CNIL, on legitimate interests, provided the message relates to the person's professional role, they were told where their data came from, and they can object easily. Generic addresses (`info@`, `contact@`) concern the legal person and fall outside. |
-| **Netherlands** | **Consent, with a narrow carve-out** | The opt-in reaches legal persons. The exception covers addresses the recipient **published and designated for receiving such messages** — a scraped or guessed `first.last@` generally will not qualify. |
-| **Ireland** | **Opt-out for business addresses** | Where the address reasonably appears to be used mainly for commercial activity and the message relates solely to that activity. Breaches are criminal, not merely administrative. |
+**The rule genuinely differs by country, and the difference is opt-in versus
+opt-out.** Some member states require prior consent before a cold B2B email;
+others allow an opt-out approach where the message relates to the recipient's
+professional role. Germany is at the strict end and is enforced through
+competition law, which means competitors and trade associations can act, not
+just a regulator. France sits at the permissive end via its regulator's
+legitimate-interest position. The Netherlands, Ireland, Italy, Spain, Austria
+and the Nordics all differ again.
 
-Italy, Spain, Austria and the Nordics are not covered here. Austria in particular
-is strict. Do not read four countries as a survey.
+**This document deliberately does not tell you which bucket your market is in.**
+Restating national implementing law accurately is a moving target — the texts
+are amended, regulator guidance is revised, and a confident sentence here that
+turns out to be a year stale is worse than no sentence, because you would rely
+on it. What this project can honestly give you is the shape of the problem and
+the primary sources:
+
+- [ePrivacy Directive 2002/58/EC, Article 13](https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A02002L0058-20091219) — the consent rule, and 13(5), which is where the divergence comes from
+- [GDPR Articles 6, 14 and 21](https://eur-lex.europa.eu/eli/reg/2016/679/oj) — lawful basis, the disclosure you owe, the absolute objection right
+- Your own national regulator's direct-marketing guidance, which is the only source that will be current
+
+**Practical default:** treat EU, EEA and UK recipients as consent-required until
+you have confirmed otherwise for that specific market, and get advice for the
+markets you actually sell into. If you are only sending to the US, none of this
+section applies to you — [CAN-SPAM](#can-spam-us) does.
 
 ### What you must tell people
 
