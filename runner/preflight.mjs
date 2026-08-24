@@ -73,6 +73,17 @@ if (cfg) {
     fatals++;
   } else pass('voice pack found', cfg.voice_pack);
 
+  // Custom plays are the moldability surface. Report what was actually loaded,
+  // because the failure this replaces was a config key that pointed anywhere at
+  // all and silently loaded nothing.
+  const plays = cfg.__meta.plays;
+  if (plays.custom.length) {
+    pass(`${plays.custom.length} custom play(s) loaded`, plays.custom.map((p) => p.split(/[\\/]/).pop()).join(' '));
+  } else {
+    pass('using the shipped plays', 'add your own under config/plays/ — see config/plays/README.md');
+  }
+  for (const p of plays.problems) { warn('extra_plays', p); warnings++; }
+
   // State must be writable, or dedupe silently stops working.
   const stateDir = resolveStateDir();
   try {

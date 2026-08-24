@@ -8,8 +8,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { join, basename } from 'node:path';
 import { dump, load } from 'js-yaml';
 import { loadConfig, ConfigError, ROOT } from '../runner/lib/config.mjs';
 
@@ -200,4 +200,48 @@ test('all problems are reported at once, not one per run', () => {
   assert.match(p, /provider_user_id/);
   assert.match(p, /run_mode/);
   assert.match(p, /suppression/);
+});
+
+// --- custom plays: the moldability surface -----------------------------------
+// This key was documented and then never read by the loader, so a customer could
+// point it anywhere and get no play and no error. These tests exist so that
+// cannot come back.
+
+test('extra_plays pointing at the shipped catalogue means "no extras"', () => {
+  const cfg = loadWith((c) => { c.extra_plays = '.claude/skills/pipeline-agent/plays.md'; });
+  assert.equal(cfg.__meta.plays.custom.length, 0);
+  assert.equal(cfg.__meta.plays.problems.length, 0);
+});
+
+test('extra_plays pointing at a missing path warns instead of silently loading nothing', () => {
+  const cfg = loadWith((c) => { c.extra_plays = 'config/definitely-not-here'; });
+  assert.equal(cfg.__meta.plays.custom.length, 0);
+  assert.match(cfg.__meta.plays.problems.join('\n'), /does not exist/);
+});
+
+test('extra_plays directory loads .md plays and skips its README', () => {
+  const dir = join(ROOT, 'config', `__test_plays_${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'README.md'), '# not a play');
+  writeFileSync(join(dir, 'alpha.md'), '---\nid: alpha\n---\n');
+  writeFileSync(join(dir, 'beta.md'), '---\nid: beta\n---\n');
+  writeFileSync(join(dir, 'notes.txt'), 'ignored');
+  try {
+    const cfg = loadWith((c) => { c.extra_plays = `config/${basename(dir)}`; });
+    const names = cfg.__meta.plays.custom.map((p) => basename(p)).sort();
+    assert.deepEqual(names, ['alpha.md', 'beta.md'], 'README.md and non-markdown must be skipped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('extra_plays pointing at a single file loads that file', () => {
+  const f = join(ROOT, 'config', `__test_play_${Math.random().toString(36).slice(2, 8)}.md`);
+  writeFileSync(f, '---\nid: solo\n---\n');
+  try {
+    const cfg = loadWith((c) => { c.extra_plays = `config/${basename(f)}`; });
+    assert.equal(cfg.__meta.plays.custom.length, 1);
+  } finally {
+    rmSync(f, { force: true });
+  }
 });

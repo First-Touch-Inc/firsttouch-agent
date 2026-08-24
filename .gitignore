@@ -27,6 +27,11 @@ config/tenant.yaml
 config/*.local.yaml
 voice-pack.md
 
+# Your own plays. The directory and its README are tracked; the plays are not —
+# that is what keeps `git pull upstream main` conflict-free.
+config/plays/*
+!config/plays/README.md
+
 # Contains the personal data of people who asked not to be contacted. Keep it,
 # back it up, and mount it into your container — but do not publish it.
 do-not-contact.txt

@@ -10,7 +10,7 @@
 // `|| '<some literal>'` fallback in that codebase was a place where a
 // misconfigured run silently did the wrong thing instead of stopping.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load } from 'js-yaml';
@@ -208,11 +208,74 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
     voicePackPath: cfg.voice_pack
       ? (isAbsolute(cfg.voice_pack) ? cfg.voice_pack : join(ROOT, cfg.voice_pack))
       : null,
+    plays: resolvePlays(cfg),
     effectiveCap: cfg.run_mode === 'supervised'
       ? (cfg.caps?.supervised_run_cap ?? 3)
       : cfg.caps.max_per_day,
   };
   return cfg;
+}
+
+/**
+ * Resolve the play catalogue: the shipped one, plus any plays the tenant added.
+ *
+ * `extra_plays` may point at a single Markdown file OR a directory of them. A
+ * directory is the interesting case: it is how a customer adds a play we never
+ * shipped without touching `.claude/skills/` or `runner/`, which is what keeps
+ * their fork mergeable with upstream forever.
+ *
+ * This used to be documented and then silently ignored — the loader never read
+ * the key, so a customer could point it anywhere and get no play and no error.
+ * A customization surface that fails silently is worse than not having one.
+ */
+export function resolvePlays(cfg) {
+  const shipped = join(ROOT, '.claude', 'skills', 'pipeline-agent', 'plays.md');
+  const out = { shipped, custom: [], problems: [] };
+
+  const raw = cfg.extra_plays;
+  if (isBlank(raw)) return out;
+
+  const p = isAbsolute(raw) ? raw : join(ROOT, raw);
+
+  // Pointing at the shipped catalogue is the default and means "no extras".
+  if (resolve(p) === resolve(shipped)) return out;
+
+  if (!existsSync(p)) {
+    out.problems.push(
+      `extra_plays points at "${raw}", which does not exist. ` +
+      `Create it, or remove the key to use only the shipped plays.`,
+    );
+    return out;
+  }
+
+  let stat;
+  try {
+    stat = statSync(p);
+  } catch (e) {
+    out.problems.push(`extra_plays "${raw}" could not be read: ${e.message}`);
+    return out;
+  }
+
+  if (stat.isFile()) {
+    out.custom.push(p);
+    return out;
+  }
+
+  const entries = readdirSync(p)
+    .filter((f) => f.toLowerCase().endsWith('.md') && f.toLowerCase() !== 'readme.md')
+    .sort()
+    .map((f) => join(p, f));
+
+  if (entries.length === 0) {
+    // Not an error: an empty overlay directory is a perfectly reasonable
+    // starting state, and failing here would block a fresh setup.
+    out.problems.push(
+      `extra_plays directory "${raw}" contains no .md play files yet — using only the shipped plays.`,
+    );
+    return out;
+  }
+  out.custom.push(...entries);
+  return out;
 }
 
 export function resolveStateDir() {

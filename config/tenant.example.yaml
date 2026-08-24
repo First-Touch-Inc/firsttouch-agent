@@ -99,7 +99,12 @@ icp: >
 # voice-pack.md and fill it in — this is the single highest-leverage file for
 # output quality, and it stays untracked alongside your config.
 voice_pack: "voice-pack.md"
-extra_plays: ".claude/skills/pipeline-agent/plays.md"
+
+# Your own plays. Point this at a DIRECTORY of Markdown play files (or a single
+# file) to add motions the engine never shipped, without touching .claude/ or
+# runner/ — which is what keeps your fork mergeable with upstream.
+# Leave it as-is to use only the shipped plays. See config/plays/README.md.
+extra_plays: "config/plays"
 
 # -----------------------------------------------------------------------------
 # BUCKETS — the core abstraction.

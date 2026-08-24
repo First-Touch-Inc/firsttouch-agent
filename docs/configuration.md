@@ -99,7 +99,7 @@ not to produce volume.
 | Key | Type | Required | What it does | If you get it wrong |
 |---|---|---|---|---|
 | `voice_pack` | string (path) | No, but | Path to your voice pack, relative to the repo root or absolute. **The single biggest lever on draft quality.** | Absent → preflight warns "Drafts will be generic". Present but the file does not exist → preflight **fails**. |
-| `extra_plays` | string (path) | No | Path to the play catalogue. Defaults to the shipped `.claude/skills/pipeline-agent/plays.md`. | Not validated by the loader. |
+| `extra_plays` | string (path) | No | A file **or directory** of your own Markdown plays, added on top of the shipped catalogue. Defaults to `config/plays`. | Resolved and reported by `npm run preflight`, which prints how many custom plays loaded. A path that does not exist is a warning, not a silent no-op. |
 
 ### `buckets`
 
