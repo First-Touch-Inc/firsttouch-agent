@@ -37,6 +37,37 @@ import { Ledger } from './ledger.mjs';
 
 const iso = (d) => d.toISOString();
 
+/**
+ * Verify a created action holds the approved copy and the right sender, THEN
+ * complete it. Shared by single-contact outreach and campaign drip so both
+ * enforce the same invariant: never complete a task whose copy or owner does
+ * not match, because completing an approval-gated task IS the send. Returns
+ * { ok } or { conflict: detail } — the caller decides what to do with a
+ * conflict (single: abort; campaign: skip this member).
+ */
+async function verifyAndComplete({ platform, taskIds, steps, ownerProviderId }) {
+  for (let i = 0; i < taskIds.length; i++) {
+    const task = await platform.readTask(taskIds[i]);
+    if (task.status === 'completed') continue;
+    if (task.status === 'cancelled') {
+      return { conflict: `task ${taskIds[i]} was cancelled on the platform — not completing` };
+    }
+    if (task.owner_provider_id && task.owner_provider_id !== ownerProviderId) {
+      return { conflict: `task ${taskIds[i]} landed on owner ${task.owner_provider_id}, expected ${ownerProviderId} — sending as the wrong person is irreversible` };
+    }
+    const expected = steps[i]?.copy;
+    if (expected !== undefined && task.copy !== undefined && task.copy !== null && task.copy !== expected) {
+      return { conflict: `task ${taskIds[i]} does not hold the approved copy — completion refused so the human's edit cannot be silently lost` };
+    }
+  }
+  // All verified: complete every non-terminal task.
+  for (const taskId of taskIds) {
+    const task = await platform.readTask(taskId);
+    if (task.status !== 'completed') await platform.completeTask(taskId);
+  }
+  return { ok: true };
+}
+
 /** Merge the human's edits into the drafted steps. Edits are keyed by step
  *  index as a string ("0", "1", …) because that is what the modal submits. */
 export function mergeEdits(steps, edits) {
@@ -147,40 +178,20 @@ async function applyOutreach({ ledger, item, decision, platform }) {
     ledger.recordApplyResult(createKey, `created:${taskIds.join(',')}`);
   }
 
-  // Verify EVERY task before completing ANY: owner and copy must match.
-  for (let i = 0; i < taskIds.length; i++) {
-    const task = await platform.readTask(taskIds[i]);
-    if (task.status === 'completed') continue; // platform queue got there first
-    if (task.owner_provider_id !== item.owner_provider_id) {
-      await platform.cancelAction(taskIds);
-      return {
-        outcome: 'conflict',
-        detail: `task ${taskIds[i]} landed on owner ${task.owner_provider_id}, expected ` +
-                `${item.owner_provider_id} — cancelled everything; sending as the wrong ` +
-                `person is irreversible, so nothing was completed`,
-      };
-    }
-    const expected = steps[i]?.copy;
-    if (expected !== undefined && task.copy !== expected) {
-      return {
-        outcome: 'conflict',
-        detail: `task ${taskIds[i]} does not hold the approved copy — completion refused so ` +
-                `the human's edit cannot be silently lost`,
-      };
-    }
-  }
+  // Store task ids back so a crash-recovery or reconcile can find this work
+  // (they were previously never persisted — a created-but-not-completed action
+  // was untrackable).
+  ledger.setWorkItemTaskIds(item.id, taskIds);
 
-  // Only now: complete, each under its own apply_key.
-  let completed = 0;
-  for (const taskId of taskIds) {
-    const key = Ledger.applyKey(item.id, decision.id, `complete:${taskId}`);
-    if (!ledger.claimApply(key, item.id, `complete:${taskId}`)) { completed++; continue; }
-    const task = await platform.readTask(taskId);       // GET first, again
-    if (task.status !== 'completed') await platform.completeTask(taskId);
-    ledger.recordApplyResult(key, 'completed');
-    completed++;
+  // Verify owner + copy on EVERY task, then complete. On a mismatch, cancel the
+  // whole action — sending as the wrong person or with lost edits is
+  // irreversible, so nothing is completed.
+  const v = await verifyAndComplete({ platform, taskIds, steps, ownerProviderId: item.owner_provider_id });
+  if (v.conflict) {
+    await platform.cancelAction(taskIds);
+    return { outcome: 'conflict', detail: `${v.conflict} — cancelled the action, nothing was completed` };
   }
-  return { outcome: 'applied', detail: `sent: ${completed} step(s) completed with the approved copy` };
+  return { outcome: 'applied', detail: `sent: ${taskIds.length} step(s) completed with the approved copy` };
 }
 
 async function applyFlowEnrolment({ ledger, cfg, item, decision, platform, now }) {
@@ -317,9 +328,17 @@ export async function applyCampaignTick({ ledger, cfg, item, platform, now = () 
     const created = await platform.createAction({
       subject: member.subject, steps, ownerProviderId: item.owner_provider_id,
     });
-    for (const taskId of created.task_ids) {
-      const t = await platform.readTask(taskId);
-      if (t.status !== 'completed') await platform.completeTask(taskId);
+    // SAME verify as single-contact: never complete a member's task whose copy
+    // or sender does not match. A mismatch skips this member (releasing its
+    // reservation), it does not send the wrong thing.
+    const v = await verifyAndComplete({
+      platform, taskIds: created.task_ids, steps, ownerProviderId: item.owner_provider_id,
+    });
+    if (v.conflict) {
+      ledger.releaseTouch(reserve.touchId);
+      ledger.recordApplyResult(memberKey, `conflict:${v.conflict}`);
+      skipped++;
+      continue;
     }
     ledger.confirmTouch(reserve.touchId);
     ledger.recordApplyResult(memberKey, 'sent');

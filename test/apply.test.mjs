@@ -390,3 +390,81 @@ test('a member suppressed after batch approval is skipped at send time', async (
   assert.equal(r.outcome, 'applied');
   assert.match(r.detail, /1 sent this tick, 1 skipped/);
 });
+
+// --- campaign verify parity (B-10) -------------------------------------------
+
+test('a campaign member whose task holds the wrong copy is skipped, not sent', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  const members = [
+    { subject: { email: 'good@x.com' }, subject_id: ledger.resolveSubject('person', { normalized_email: 'good@x.com' }) },
+    { subject: { email: 'bad@y.com' }, subject_id: ledger.resolveSubject('person', { normalized_email: 'bad@y.com' }) },
+  ];
+  const id = ledger.createWorkItem({
+    teammate: 'agent', motion: 'chat', kind: 'outreach',
+    payload: { campaign: { name: 'c', why: 'w', steps: [{ channel: 'email', copy: 'the approved copy' }], admitted: members, excluded: [] } },
+    ownerProviderId: 'usr_ada', expiresAt: FUTURE,
+  });
+  approve(ledger, id);
+  // The platform stores the wrong copy for the SECOND member's task.
+  let n = 0;
+  const realCreate = platform.createAction.bind(platform);
+  platform.createAction = async (args) => {
+    n++;
+    platform.state.nextTaskIds = [`c${n}`];
+    if (n === 2) platform.state.tasks[`c${n}`] = { status: 'open', copy: 'WRONG', owner_provider_id: 'usr_ada' };
+    return realCreate(args);
+  };
+  const r = await applyCampaignTick({ ledger, cfg: CFG, item: ledger.getWorkItem(id), platform, now: NOW });
+  assert.match(r.detail, /1 sent this tick, 1 skipped/);
+  assert.ok(!platform.state.calls.some(([nm, tid]) => nm === 'completeTask' && tid === 'c2'),
+    'the wrong-copy member must never be completed');
+});
+
+// --- crash between complete-claim and complete-effect (B-15) -----------------
+
+test('a completion claimed but not performed is re-driven, not counted as done', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  const id = stageOutreach(ledger);
+  const d = approve(ledger, id);
+  const { Ledger } = await import('../runner/lib/ledger.mjs');
+  // Simulate: the complete key was claimed, but completeTask never ran.
+  platform.state.tasks.t1 = { status: 'open', copy: 'original draft', owner_provider_id: 'usr_ada' };
+  platform.state.existing = { task_ids: ['t1'] };
+  ledger.claimApply(Ledger.applyKey(id, d.id, 'create'), id, 'create');
+  ledger.claimApply(Ledger.applyKey(id, d.id, 'complete:t1'), id, 'complete:t1');
+  const r = await applyWorkItem({ ledger, cfg: CFG, workItemId: id, platform, crm: fakeCrm(), now: NOW });
+  assert.equal(r.outcome, 'applied');
+  assert.ok(platform.state.calls.some(([nm, tid]) => nm === 'completeTask' && tid === 't1'),
+    'the claimed-but-unfinished completion must actually be performed, not skipped as done');
+});
+
+test('task ids are persisted on the work item after create', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  const id = stageOutreach(ledger);
+  approve(ledger, id);
+  await applyWorkItem({ ledger, cfg: CFG, workItemId: id, platform, crm: fakeCrm(), now: NOW });
+  assert.deepEqual(ledger.getWorkItem(id).task_ids, ['t1'], 'task ids must be stored for reconcile');
+});
+
+// --- undo race (B-14): claim vs cancel -------------------------------------
+
+test('once the applier claims an intent, a late undo cannot cancel it', () => {
+  const ledger = openLedger(':memory:');
+  const id = stageOutreach(ledger);
+  const d = approve(ledger, id);
+  const intent = ledger.createIntent({ workItemId: id, decisionId: d.id });
+  assert.equal(ledger.claimIntent(intent.id), true, 'the applier wins the claim');
+  assert.equal(ledger.cancelPendingIntent(id), false, 'the racing undo now loses');
+});
+
+test('an undo that lands first prevents the applier from claiming', () => {
+  const ledger = openLedger(':memory:');
+  const id = stageOutreach(ledger);
+  const d = approve(ledger, id);
+  const intent = ledger.createIntent({ workItemId: id, decisionId: d.id });
+  assert.equal(ledger.cancelPendingIntent(id), true, 'the undo wins');
+  assert.equal(ledger.claimIntent(intent.id), false, 'the applier cannot claim a cancelled intent');
+});

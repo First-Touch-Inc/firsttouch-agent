@@ -443,16 +443,40 @@ const TICK_MS = 5000;
 let lastScheduleCheck = 0;
 let lastLearnCheck = 0;
 
+let ticking = false;
 async function tick() {
+  // Ticks must not overlap: a slow chat.postMessage or a slow apply could let
+  // a second tick double-post a card or double-drive an intent. A boolean
+  // guard is enough — everything here is single-process.
+  if (ticking) return;
+  ticking = true;
+  try {
+    await tickBody();
+  } finally {
+    ticking = false;
+  }
+}
+
+async function tickBody() {
   const now = new Date();
 
-  // 1. Fire due intents (approvals whose undo window has passed).
+  // 1. Fire due intents (approvals whose undo window has passed). The intent is
+  //    marked applied ONLY after apply reaches a terminal outcome — if we
+  //    marked it first and then crashed, the approval would be silently lost.
+  //    An 'applying'/'retry' outcome leaves the intent pending so step 2
+  //    re-drives it.
   for (const intent of ledger.dueIntents(now.toISOString())) {
-    ledger.setIntentStatus(intent.id, 'applied');
     if (!platform) continue;
+    // Claim the intent atomically. If an Undo cancelled it a moment ago this
+    // returns false and we do nothing — the send does not go out after Undo.
+    if (!ledger.claimIntent(intent.id)) continue;
     const result = await applyWorkItem({
       ledger, cfg, workItemId: intent.work_item_id, platform, crm, now: () => new Date(),
     });
+    // The intent's scheduling job is done after one drive; a transient failure
+    // leaves the work item 'applying' and step 2 re-drives it by status, so we
+    // never double-drive through both paths.
+    ledger.setIntentStatus(intent.id, 'applied');
     const item = ledger.getWorkItem(intent.work_item_id);
     await updateCardMessage(item, { decision: ledger.effectiveDecision(item.id) });
     if (result.outcome === 'conflict') {
@@ -461,18 +485,26 @@ async function tick() {
     }
   }
 
-  // 2. Continue any campaign still dripping.
+  // 2. Re-drive everything stuck in 'applying' — campaigns mid-drip AND any
+  //    single item whose apply threw a transient error or was interrupted by a
+  //    restart. "The next tick retries" is now true.
   if (platform) {
     const dripping = ledger.db.prepare(
       "SELECT id FROM work_items WHERE status = 'applying'").all();
     for (const { id } of dripping) {
       const item = ledger.getWorkItem(id);
-      if (!item.payload.campaign) continue;
-      const r = await applyCampaignTick({ ledger, cfg, item, platform, now: () => new Date() });
+      const r = item.payload.campaign
+        ? await applyCampaignTick({ ledger, cfg, item, platform, now: () => new Date() })
+        : await applyWorkItem({ ledger, cfg, workItemId: id, platform, crm, now: () => new Date() });
       if (r.outcome === 'applied') {
         ledger.setWorkItemStatus(id, 'applied');
         await updateCardMessage(ledger.getWorkItem(id));
-        await say(item.slack_channel ?? cfg.approval.digest_channel, `✅ ${r.detail}`, item.slack_ts);
+        if (item.payload.campaign) {
+          await say(item.slack_channel ?? cfg.approval.digest_channel, `✅ ${r.detail}`, item.slack_ts);
+        }
+      } else if (r.outcome === 'conflict') {
+        await updateCardMessage(ledger.getWorkItem(id));
+        await say(item.slack_channel ?? cfg.approval.digest_channel, `⚠️ ${r.detail}`, item.slack_ts);
       }
     }
   }

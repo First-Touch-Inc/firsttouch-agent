@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS intents (
   decision_id  TEXT NOT NULL REFERENCES decisions(id),
   apply_after  TEXT NOT NULL,
   status       TEXT NOT NULL DEFAULT 'pending'
-               CHECK (status IN ('pending','cancelled','applied','failed')),
+               CHECK (status IN ('pending','applying','cancelled','applied','failed')),
   created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_intents_due ON intents(status, apply_after);
@@ -449,6 +449,13 @@ export class Ledger {
       .run(channel, ts, id);
   }
 
+  /** Persist the platform task ids created for a work item, so a crash between
+   *  create and complete leaves the work findable instead of orphaned. */
+  setWorkItemTaskIds(id, taskIds) {
+    this.db.prepare('UPDATE work_items SET task_ids = ? WHERE id = ?')
+      .run(JSON.stringify(taskIds ?? []), id);
+  }
+
   /** Record a decision. slack_event_id is UNIQUE so a Slack retry of the same
    *  event records nothing the second time (returns the existing decision). */
   recordDecision({ workItemId, actorSlackId, decision, edits = null, reason = null,
@@ -499,6 +506,16 @@ export class Ledger {
 
   /** Cancel the pending intent for a work item (an undo click). Returns true
    *  if there was one to cancel — false means the window already closed. */
+  /** Atomically claim a pending intent for application (pending → applying).
+   *  Returns true if this caller won. An Undo racing at the window edge can
+   *  only cancel while the intent is still 'pending'; once the applier has
+   *  claimed it, cancel loses and the undo is correctly refused. */
+  claimIntent(id) {
+    const r = this.db.prepare(
+      "UPDATE intents SET status = 'applying' WHERE id = ? AND status = 'pending'").run(id);
+    return r.changes > 0;
+  }
+
   cancelPendingIntent(workItemId) {
     const r = this.db.prepare(
       "UPDATE intents SET status = 'cancelled' WHERE work_item_id = ? AND status = 'pending'")
