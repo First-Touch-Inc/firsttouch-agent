@@ -11,7 +11,7 @@
 // when a scheduled run misbehaves.
 
 import { loadConfig, checkEnvironment, ConfigError, configPath, resolveStateDir } from './lib/config.mjs';
-import { existsSync, accessSync, constants, mkdirSync } from 'node:fs';
+import { existsSync, accessSync, constants, mkdirSync, readFileSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
 const offline = argv.includes('--offline');
@@ -83,6 +83,15 @@ if (cfg) {
     pass('using the shipped plays', 'add your own under config/plays/ — see config/plays/README.md');
   }
   for (const p of plays.problems) { warn('extra_plays', p); warnings++; }
+
+  // The feedback loop is invisible until you look, so say where it stands.
+  const lp = cfg.__meta.lessonsPath;
+  if (lp && existsSync(lp)) {
+    const lines = readFileSync(lp, 'utf8').split(String.fromCharCode(10)).filter((l) => l.trim().startsWith('-')).length;
+    pass(`feedback memory: ${lines} lesson(s)`, cfg.state.lessons);
+  } else {
+    pass('feedback memory ready', `${cfg.state.lessons} — written after the first approvals come back`);
+  }
 
   // State must be writable, or dedupe silently stops working.
   const stateDir = resolveStateDir();

@@ -222,6 +222,21 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
   if (!Array.isArray(cfg.suppression) || cfg.suppression.length === 0) {
     problems.push('suppression must list at least one check. Removing all of them means prospecting your own customers.');
   }
+  // The orchestrator reads and writes state.lessons on every run — it is the
+  // feedback-learning loop. A missing key means the agent is told to append
+  // corrections to a path that does not exist, and the learning silently
+  // never happens.
+  if (isBlank(cfg.state?.lessons)) {
+    problems.push(
+      'state.lessons is required. It is where the agent records corrections from ' +
+      'the humans who approve drafts, and it is read before drafting on every run. ' +
+      'Without it the agent cannot learn from feedback. Use "state/lessons.md".',
+    );
+  }
+  if (isBlank(cfg.state?.ledger)) {
+    problems.push('state.ledger is required — it is the worked-contact history that prevents contacting someone twice.');
+  }
+
   if (cfg.dedupe && !Number.isInteger(cfg.dedupe.rework_cooldown_days)) {
     problems.push('dedupe.rework_cooldown_days must be an integer number of days.');
   }
@@ -237,6 +252,9 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
       ? (isAbsolute(cfg.voice_pack) ? cfg.voice_pack : join(ROOT, cfg.voice_pack))
       : null,
     plays: resolvePlays(cfg),
+    lessonsPath: cfg.state?.lessons
+      ? (isAbsolute(cfg.state.lessons) ? cfg.state.lessons : join(resolveStateDir(), cfg.state.lessons.replace(/^state[\/]/, '')))
+      : null,
     effectiveCap: cfg.run_mode === 'supervised'
       ? (cfg.caps?.supervised_run_cap ?? 3)
       : cfg.caps.max_per_day,

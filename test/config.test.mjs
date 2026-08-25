@@ -279,3 +279,25 @@ test('a correctly configured chat block passes', () => {
   });
   assert.equal(cfg.chat.allowed_users.length, 1);
 });
+
+// --- the feedback loop -------------------------------------------------------
+// The orchestrator reads and writes state.lessons on every run. The key was
+// referenced in five places in the skill and defined in none, so the learning
+// silently never happened. These stop that returning.
+
+test('state.lessons is required — it is the feedback memory', () => {
+  const p = problemsFrom((c) => { delete c.state.lessons; });
+  assert.match(p, /state\.lessons is required/);
+  assert.match(p, /learn from feedback/);
+});
+
+test('state.ledger is required — it is what prevents contacting someone twice', () => {
+  const p = problemsFrom((c) => { delete c.state.ledger; });
+  assert.match(p, /state\.ledger is required/);
+});
+
+test('lessons resolves to a real path under the state directory', () => {
+  const cfg = loadWith();
+  assert.ok(cfg.__meta.lessonsPath, 'the loader must resolve a lessons path');
+  assert.match(cfg.__meta.lessonsPath, /lessons\.md$/);
+});

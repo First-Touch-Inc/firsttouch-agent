@@ -464,3 +464,22 @@ sender_identity:
 state:
   ledger: "state/ledger.jsonl"     # one line per person worked: who, bucket, when, run id
   run_reports: "state/runs/"       # one JSON report per run
+
+  # THE FEEDBACK MEMORY. This is how the agent gets better, and it is the file
+  # most worth reading yourself after a few weeks.
+  #
+  # Every run reads the decisions humans made on the last batch — approved,
+  # skipped, and especially EDITED copy — and where a correction generalises
+  # past one contact, appends a dated one-line rule here. Next run reads it
+  # before drafting anything, and lessons OVERRIDE the voice pack wherever the
+  # two disagree, because a correction someone actually made beats a guideline
+  # someone wrote once.
+  #
+  # Situational fixes (wrong company fact, wrong person) deliberately do NOT
+  # become lessons — only things that would change the next draft too. Lessons
+  # are never deleted, only superseded by a newer dated entry, so you can see
+  # how the voice moved.
+  #
+  # It lives under state/ and is gitignored: it is your team's accumulated
+  # judgement, not engine code. Back it up — losing it resets the learning.
+  lessons: "state/lessons.md" 
