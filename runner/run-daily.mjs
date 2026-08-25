@@ -172,16 +172,19 @@ function buildPrompt() {
 // --- 5. spawn the agent ------------------------------------------------------
 function spawnAgent(mcpPath) {
   return new Promise((resolveRun) => {
-    // `--allowedTools` is not optional here. A headless `-p` session starts in
-    // manual permission mode, and `--permission-mode` alone does NOT
-    // auto-approve MCP tools — without an explicit allowlist the run stalls on
-    // the first CRM call and looks like a hang.
+    // Three different flags, three different jobs — conflating them is how you
+    // end up believing you have a restriction when you have a convenience.
     //
-    // The list is an allowlist rather than `bypassPermissions` on purpose: this
-    // process holds live CRM and outreach credentials, and the agent has no
-    // business running arbitrary shell commands. Note what is absent — Bash,
-    // and any outreach tool that sends. Sending is gated by the platform's
-    // approval queue, and this list is the second lock on that door.
+    //   --allowedTools     AUTO-APPROVES these. It does NOT make unlisted tools
+    //                      disappear. Needed because a headless `-p` session
+    //                      starts in manual permission mode, so without it the
+    //                      run stalls on the first CRM call and looks like a hang.
+    //   --tools            The actual restriction: which BUILT-IN tools exist at
+    //                      all. This is what removes Bash from the session.
+    //   --disallowedTools  Explicit deny, belt and braces on top of --tools.
+    //
+    // Sending is gated by the platform's approval queue and the send guard;
+    // none of these flags are the primary control for that.
     const allowedTools = [
       'mcp__outreach__*',
       'mcp__crm__*',
@@ -190,11 +193,16 @@ function spawnAgent(mcpPath) {
       'TodoWrite', 'Task',
     ].join(',');
 
+    // The built-in tools this run legitimately needs. Bash is absent by
+    // construction, not merely denied.
+    const builtins = 'Read,Glob,Grep,Write,Edit,WebSearch,WebFetch,TodoWrite,Task';
+
     const args = [
       '-p', buildPrompt(),
       '--output-format', 'stream-json',
       '--verbose',
       '--permission-mode', 'acceptEdits',
+      '--tools', builtins,
       '--allowedTools', allowedTools,
       '--disallowedTools', 'Bash',
       '--mcp-config', mcpPath,
