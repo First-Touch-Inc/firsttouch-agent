@@ -26,12 +26,13 @@ function validConfig() {
   cfg.providers.crm.customer_signal = [{ property: 'active_seats', equals: 'yes' }];
   const outbound = cfg.motions.find((m) => m.kind === 'outbound');
   for (const s of outbound.sources) if (s.type === 'crm.list') s.list_id = 'list_123';
-  cfg.approval.channel = 'C01234ABCDE';
+  cfg.approval.digest_channel = 'C01234ABCDE';
   cfg.approval_routing.owners = [{
     id: 'primary',
     name: 'Ada Lovelace',
     provider_user_id: 'usr_test_123',
     slack_user_id: 'U01234ABCDE',
+    slack_channel: 'C09876ZYXWV',
     match: 'default',
   }];
   cfg.chat.allowed_users = ['U01234ABCDE'];
@@ -223,9 +224,25 @@ test('a missing approval block is rejected', () => {
   assert.match(p, /approval is required/);
 });
 
-test('approval.channel must be a channel ID, not a #name', () => {
-  const p = problemsFrom((c) => { c.approval.channel = '#approvals'; });
+test('approval.digest_channel must be a channel ID, not a #name', () => {
+  const p = problemsFrom((c) => { c.approval.digest_channel = '#approvals'; });
   assert.match(p, /Slack channel ID/);
+});
+
+// --- per-owner routing: cards land in the owner's channel --------------------
+// Jared's approvals go to #jared-approvals, Emily's to #emily-approvals. An
+// owner without a channel would have their cards silently buried in someone
+// else's inbox, so it is required, not defaulted.
+
+test('an owner without an approvals channel is rejected', () => {
+  const p = problemsFrom((c) => { delete c.approval_routing.owners[0].slack_channel; });
+  assert.match(p, /slack_channel/);
+  assert.match(p, /every card that sends as them/);
+});
+
+test('an owner channel that is a #name instead of an ID is rejected', () => {
+  const p = problemsFrom((c) => { c.approval_routing.owners[0].slack_channel = '#ada-approvals'; });
+  assert.match(p, /slack_channel must be a Slack channel ID/);
 });
 
 test('an undo window outside 10–300 seconds is rejected', () => {

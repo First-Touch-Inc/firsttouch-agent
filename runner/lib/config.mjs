@@ -244,9 +244,12 @@ export function validateConfig(cfg) {
   }
 
   // --- approval -------------------------------------------------------------
+  // Cards route BY OWNER (each owner's slack_channel below), because only the
+  // person a message sends as may approve it. The digest channel is for run
+  // digests and report-only cards, which have no sender.
   if (cfg.approval !== undefined) {
-    if (isBlank(cfg.approval.channel) || !/^C[A-Z0-9]{6,}$/i.test(String(cfg.approval.channel))) {
-      problems.push('approval.channel must be a Slack channel ID (Cxxxxxxxx), not a #name.');
+    if (isBlank(cfg.approval.digest_channel) || !/^C[A-Z0-9]{6,}$/i.test(String(cfg.approval.digest_channel))) {
+      problems.push('approval.digest_channel must be a Slack channel ID (Cxxxxxxxx), not a #name.');
     }
     const undo = cfg.approval.undo_seconds;
     if (!Number.isInteger(undo) || undo < 10 || undo > 300) {
@@ -257,7 +260,7 @@ export function validateConfig(cfg) {
       problems.push('approval.expiry_hours must be a positive integer. Expired cards are NEVER applied late.');
     }
   } else {
-    problems.push('approval is required: channel, undo_seconds, expiry_hours.');
+    problems.push('approval is required: digest_channel, undo_seconds, expiry_hours.');
   }
 
   // --- ownership ------------------------------------------------------------
@@ -292,6 +295,15 @@ export function validateConfig(cfg) {
       }
       if (!isBlank(o?.slack_user_id) && !/^U[A-Z0-9]{6,}$/i.test(String(o.slack_user_id))) {
         problems.push(`owner "${id}": slack_user_id "${o.slack_user_id}" is not a Slack user ID (Uxxxxxxxx).`);
+      }
+      // Each owner's channel is their inbox of pending sends. Without one,
+      // their cards have nowhere to land — routing to a shared default would
+      // quietly bury one person's approvals in someone else's channel.
+      if (isBlank(o?.slack_channel) || !/^C[A-Z0-9]{6,}$/i.test(String(o.slack_channel))) {
+        problems.push(
+          `owner "${id}": slack_channel must be a Slack channel ID (Cxxxxxxxx) — ` +
+          `their approvals channel, where every card that sends as them lands.`,
+        );
       }
     }
   }

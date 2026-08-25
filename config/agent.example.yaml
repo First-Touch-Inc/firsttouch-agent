@@ -88,9 +88,14 @@ motions:
 # ---------------------------------------------------------------------------
 # Approvals. The card offers: Approve (whole) / Edit & approve (copy only) /
 # Deny (reason required). Approvals get an undo window; denials are instant.
+#
+# Cards route BY OWNER, not by motion: each owner's channel is their inbox of
+# pending sends, whatever job produced them — because only the person a
+# message sends AS may approve it. Cards carry a motion badge so you can see
+# which job drafted them.
 # ---------------------------------------------------------------------------
 approval:
-  channel: "<C…>"                     # where cards land by default
+  digest_channel: "<C…>"              # run digests + report-only cards (no sender)
   undo_seconds: 45
   expiry_hours: 72                    # unactioned cards expire UNAPPLIED
 
@@ -100,6 +105,7 @@ approval_routing:
       name: "<Ada Example>"
       provider_user_id: "<usr_…>"     # WHOSE ACCOUNT messages send from
       slack_user_id: "<U…>"           # who may click approve (self-confirmed by DM)
+      slack_channel: "<C…>"           # THEIR approvals channel (e.g. #ada-approvals)
       match: default                  # exactly one owner has match: default
   approval_overrides: []              # Slack ids who may approve for anyone; empty = nobody
 
