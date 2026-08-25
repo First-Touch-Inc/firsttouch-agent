@@ -1,132 +1,95 @@
 # Providers
 
-The agent talks to two external systems, declared in `config/tenant.yaml`:
+Every external system the agent touches is reached through an adapter in
+[`runner/lib/providers.mjs`](../runner/lib/providers.mjs). That file is the
+**only** place provider credentials live, and it runs in trusted processes only
+— the host and the tool server. The model's environment never contains these
+tokens; it acts on the world only by calling the enumerated tools the tool
+server exposes.
 
-```yaml
-providers:
-  outreach:
-    kind: firsttouch      # executes touches, owns the approval queue
-  crm:
-    kind: hubspot         # accounts, contacts, ownership
-```
+- [FirstTouch (outreach)](#firsttouch-outreach)
+- [HubSpot (CRM)](#hubspot-crm)
+- [The dashboard reader (cs_postclose)](#the-dashboard-reader-cs_postclose)
+- [Adding a provider](#adding-a-provider)
+- [External tools](#external-tools)
 
-Only those two values have adapters today. Anything else fails at startup with a
-message naming what is implemented — deliberately, rather than starting up and
-half-working:
+---
 
-```
-providers.crm.kind "salesforce" has no adapter in this repo.
-Implemented: hubspot. See docs/providers.md to add one.
-```
+## FirstTouch (outreach)
 
-That check lives in [`runner/lib/config.mjs`](../runner/lib/config.mjs).
+FirstTouch is reached over **MCP** (streamable HTTP), not a REST API: one
+bearer token, `FT_MCP_TOKEN`, against `https://mcp.firsttouch.ai`
+(override with `FT_MCP_URL`). The adapter covers the whole outreach lifecycle:
 
-## The two roles are not interchangeable
+- **Source sweeps** — social-engagement engagers, a HubSpot list preview,
+  ICP-filter contact discovery.
+- **Enrichment** — contact, company, and email-finding (paid reads, behind the
+  enrichment cap).
+- **Staging and apply** — it creates each action in a **pending, approval-gated**
+  state assigned to a specific sending user (owner *and* assignee), reads it
+  back, completes it on approval, and cancels it on denial. An action created
+  without an explicit owner lands on whoever the API token authenticates as —
+  which is how one person's outreach goes out under another person's name.
 
-**The outreach provider is the safety boundary.** It creates approval-gated
-actions, holds the queue a human reviews, and is the thing that eventually
-sends. The agent never sends directly — it asks the outreach provider to create
-something *pending*. If you swap this out, you are replacing the approval gate,
-so whatever you put there must have one.
+Each mapped platform tool name is an acceptance criterion: preflight calls the
+cheap ones and refuses to start if the platform does not answer, so a renamed
+upstream tool fails at boot, not mid-apply.
 
-**The CRM is read-mostly.** The agent reads lists, contacts, companies, deals,
-owners and activity from it. The bundled adapter can write exactly one thing — a
-property update on a contact or company — and refuses even that unless
-`CRM_WRITES_ENABLED=1`. Deals are read-only with no gate to open.
+## HubSpot (CRM)
 
-## Adding a CRM adapter
+HubSpot is reached over its **REST API** directly, with `HUBSPOT_ACCESS_TOKEN`.
+It is **read-mostly**: the agent searches contacts, reads list memberships and
+deals, and lists the customers matching your `customer_signal` (the input to
+the suppression seed, so it never prospects a paying customer). The one write
+path is a **compare-and-set** property update — read the current value, then
+patch — used by motions that are allowed to change specific CRM fields.
 
-The CRM adapter is a small MCP server in this repo. There is no plugin system to
-learn: it is one file, no dependencies, and the runner points at it.
+## The dashboard reader (cs_postclose)
 
-Start from [`runner/mcp/hubspot-server.mjs`](../runner/mcp/hubspot-server.mjs).
-It is deliberately plain — JSON-RPC over stdio, `fetch`, no SDK — so it is
-readable end to end.
+The `cs_postclose` motion reads an account-health dashboard the tenant
+configures. It is **identity-asserted, not just liveness-checked**: before the
+first read of a base URL (and again after any failure) the base URL's own
+response must contain the configured `identity` string. A stale or moved host
+that merely answers `200 ok` is refused — that is the exact incident class the
+check exists to prevent.
 
-**1. Implement the same tools.** The skills call these by name, so an adapter
-that renames them will not work:
+## Adding a provider
 
-| Tool | Returns |
-|---|---|
-| `crm_get_list_members` | Contacts or companies on a saved list, paged |
-| `crm_get_contact` | One contact by id or email, with its company |
-| `crm_get_company` | One company by id or domain |
-| `crm_search_contacts` | Filter-based contact search |
-| `crm_search_companies` | Filter-based company search |
-| `crm_search_deals` | Filter-based deal search — pipeline, stage, owner, amount, close date, and how long a deal has been quiet |
-| `crm_get_deal` | One deal by id, with its associated contact and company ids |
-| `crm_get_deals_for_contact` | A contact's deals, each open/won/lost — this is what the open-deal suppression check reads |
-| `crm_get_pipelines` | Pipelines and stages, with closed-won and closed-lost decoded, because stage ids are portal-specific |
-| `crm_get_owners` | Users who can own a record — used to route drafts |
-| `crm_get_contact_activity` | Recent engagements, so the agent can tell whether anyone followed up |
-| `crm_update_property` | The only write. Must stay behind `CRM_WRITES_ENABLED`. |
+Implement the interface the existing adapters implement in
+[`runner/lib/providers.mjs`](../runner/lib/providers.mjs) — the tool server and
+the apply path consume those shapes by name, so keep the method names. Two ways
+to ship it:
 
-The four deal tools are **read-only and must stay that way**. There is no gated
-deal write to port: moving a stage, or creating or closing a deal, is a sales
-decision, and an adapter that offers it hands an outbound agent the ability to
-rewrite a forecast.
+- **In the engine** — add the adapter to `providers.mjs` and wire it in. Fine
+  for something you intend to upstream.
+- **As a private adapter, without forking** (the sanctioned door) — the overlay
+  image sets `EXTRA_ADAPTERS_DIR` to a directory it `COPY`ed into the image,
+  whose `index.mjs` exports `register({ providers, cfg })` and may extend or
+  replace providers. **The one rule, enforced in code:** that directory must
+  **not** live on the writable volume (`CONFIG_DIR`/`STATE_DIR`). Adapter code
+  is credential-holding; loading code the agent's own user could have written
+  would reopen the self-modification hole the image/volume split exists to
+  close. Image-only, or refused. See [upgrading.md](upgrading.md) for the
+  overlay model.
 
-Two of them carry requirements a re-implementation is easy to get wrong:
+## External tools
 
-- **`crm_get_pipelines` must expose per-stage closed / won / lost semantics.**
-  Stage identifiers are portal-specific in every CRM worth adapting, so an agent
-  that cannot ask "is this stage a win?" ends up pattern-matching stage labels,
-  which fails the first time a customer renames one.
-- **`crm_get_deals_for_contact` must distinguish "no open deal" from "could not
-  tell".** It backs a suppression check, and reporting an unresolvable deal as
-  "not open" is what puts prospecting mail into an account that is mid-contract.
-  Return the uncertainty and let the agent fail safe.
+`external_tools` in the config lets the agent use **any read-only MCP server**
+you name — Clay, Apollo, Gong, an internal API — proxied through the agent's
+tool server. It is **operator-config only**. Each entry names:
 
-**2. Keep the failure messages diagnostic.** The model reads them and reports
-them to a human. Say *"the private app is missing the owners read scope"*, not
-*"403"*. The bundled adapter maps every common status this way — copy that.
+- `url` — the MCP endpoint,
+- `token_env` — the **name of the environment variable** holding the token
+  (never the token itself; the model's process never holds it),
+- `allow` — the exact tools that exist; anything not listed is refused, and the
+  allowlist is re-checked on every call.
 
-**3. Keep results small.** Whitelist the properties you return. One
-unconstrained call that dumps a megabyte of CRM records into the context window
-degrades every decision the agent makes afterwards.
+Keep these to reads. They are proxied outside this agent's own approval loop,
+so acting on the world through one would be an explicit, un-gated choice rather
+than a default.
 
-**4. Register it** in `buildMcpConfig()` in
-[`runner/run-daily.mjs`](../runner/run-daily.mjs), under the server name `crm`.
-The name matters: the `--allowedTools` allowlist grants `mcp__crm__*`, so a
-server registered under a different name will have all of its tools denied.
+---
 
-**5. Add the `kind` to `IMPLEMENTED_CRM`** in `runner/lib/config.mjs`, and a test.
-
-Then:
-
-```bash
-npm run preflight     # confirms the adapter connects and the token works
-npm run dry           # a full run against it, creating nothing
-```
-
-## Adding an outreach provider
-
-Harder, and worth being honest about: this is not a drop-in swap.
-
-The outreach provider is not just a send API. The agent depends on it for
-signals (who engaged with your content), enrichment, connection status, and —
-critically — an **approval queue with per-action ownership**. Substituting a
-provider that only sends gives you an agent that drafts into nothing, with no
-gate between a draft and a real person's inbox.
-
-If you want to try, the provider must be able to:
-
-- Create an action in a **pending** state that does not send until a human approves it
-- **Assign each action to a specific sending user**, and let you read that assignment back to verify it. This one is not negotiable — see the ownership rule in [the orchestrator skill](../.claude/skills/pipeline-agent/SKILL.md). Without it, an approved draft sends from whichever account the API token belongs to, which means one person's outreach goes out under another person's name, and it cannot be undone.
-- Report existing enrollments so the agent can suppress anyone already in a sequence
-- Report connection status for social channels
-
-Talk to us before building one — open an issue describing the provider and what
-it can do, and we will tell you honestly whether the shape fits.
-
-## Why there is no generic "any CRM" abstraction
-
-It was considered and rejected. The lowest common denominator across CRMs is
-roughly "a contact has an email", which is not enough to do this job — the agent
-needs list membership, ownership, lifecycle, and activity history, and every CRM
-models those differently enough that a generic layer becomes a config language
-of its own.
-
-A concrete adapter per CRM is more code and far less rope. When you hit
-something your CRM cannot express, you find out at preflight rather than three
-weeks into a schedule.
+**Related:** [Configuration reference](configuration.md) ·
+[Deploy on Railway](deploy-railway.md) · [Upgrading](upgrading.md) ·
+[README](../README.md)
