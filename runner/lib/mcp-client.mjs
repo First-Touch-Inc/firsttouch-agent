@@ -85,7 +85,7 @@ export async function connect({ url, token, timeoutMs = 20_000 }) {
   await rpc('initialize', {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: 'pipeline-agent', version: '0.1.0' },
+    clientInfo: { name: 'firsttouch-agent', version: '0.1.0' },
   });
 
   return {

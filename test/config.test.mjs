@@ -314,7 +314,7 @@ test('all problems are reported at once, not one per run', () => {
 // cannot come back.
 
 test('extra_plays pointing at the shipped catalogue means "no extras"', () => {
-  const cfg = loadWith((c) => { c.extra_plays = '.claude/skills/pipeline-agent/plays.md'; });
+  const cfg = loadWith((c) => { c.extra_plays = '.claude/skills/firsttouch-agent/plays.md'; });
   assert.equal(cfg.__meta.plays.custom.length, 0);
   assert.equal(cfg.__meta.plays.problems.length, 0);
 });

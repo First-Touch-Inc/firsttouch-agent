@@ -12,13 +12,13 @@
 # the same reason.
 
 display_information:
-  name: Pipeline Agent
+  name: FirstTouch Agent
   description: Works your pipeline daily and asks before anything sends.
   background_color: "#22633F"
 
 features:
   bot_user:
-    display_name: pipeline-agent
+    display_name: firsttouch-agent
     always_online: true
 
 oauth_config:
@@ -29,7 +29,7 @@ oauth_config:
       - im:history           # DMs: onboarding, claim code, chat
       - im:read
       - im:write
-      - app_mentions:read    # @pipeline-agent in channels
+      - app_mentions:read    # @firsttouch-agent in channels
       - channels:read        # validate the per-owner approvals channels
       - groups:read
       - reactions:write      # the 👀 acknowledgement

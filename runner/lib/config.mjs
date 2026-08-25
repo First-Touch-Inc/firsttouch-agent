@@ -429,7 +429,7 @@ export function validateConfig(cfg) {
  * A customization surface that fails silently is worse than not having one.
  */
 export function resolvePlays(cfg) {
-  const shipped = join(ROOT, '.claude', 'skills', 'pipeline-agent', 'plays.md');
+  const shipped = join(ROOT, '.claude', 'skills', 'firsttouch-agent', 'plays.md');
   const out = { shipped, custom: [], problems: [] };
 
   const raw = cfg.extra_plays;

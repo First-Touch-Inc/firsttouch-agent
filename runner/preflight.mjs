@@ -150,7 +150,7 @@ if (!offline) {
           params: {
             protocolVersion: '2025-06-18',
             capabilities: {},
-            clientInfo: { name: 'pipeline-agent-preflight', version: '0.1.0' },
+            clientInfo: { name: 'firsttouch-agent-preflight', version: '0.1.0' },
           },
         }),
         signal: timeout(15000),

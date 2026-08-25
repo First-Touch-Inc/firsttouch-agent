@@ -1,7 +1,7 @@
 # Publish the engine image to GHCR on every version tag.
 #
 # This is what makes the overlay pattern real: a deployment-specific image
-# (ours included) is `FROM ghcr.io/first-touch-inc/firsttouch-pipeline-agent:vX.Y.Z`
+# (ours included) is `FROM ghcr.io/first-touch-inc/firsttouch-agent:vX.Y.Z`
 # plus its own config and private adapters — never a fork of this repo.
 #
 # Tags are pinned versions on purpose. An overlay that tracks :latest gets

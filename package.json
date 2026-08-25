@@ -1,5 +1,5 @@
 {
-  "name": "pipeline-agent",
+  "name": "firsttouch-agent",
   "version": "0.1.0",
   "description": "Self-hostable, approval-first pipeline agent: one Slack agent running outbound, inbound triage, deal follow-up and post-close CS motions — every send behind a human approval.",
   "type": "module",

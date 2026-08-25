@@ -1,4 +1,4 @@
-# Pipeline Agent
+# FirstTouch Agent
 
 One agent in your Slack that works your pipeline every day — and asks
 permission before anything leaves the building.
@@ -79,7 +79,7 @@ tests (`npm test`, 170 of them):
 
    ```bash
    docker run -d --restart unless-stopped --env-file .env \
-     -v pipeline-data:/data ghcr.io/first-touch-inc/firsttouch-pipeline-agent
+     -v agent-data:/data ghcr.io/first-touch-inc/firsttouch-agent
    ```
 
    (`cp .env.example .env` and fill it in first. No cron to arrange — the
