@@ -289,3 +289,74 @@ test('DRY_RUN makes the FirstTouch provider refuse every mutation, reads still w
   assert.equal(typeof live.completeTask, 'function');
   assert.deepEqual(await live.completeTask('t1'), { tool: 'complete_task' });
 });
+
+// --- FirstTouch provider sends the REAL argument shapes (verified vs live MCP)
+
+test('createAction sends one add_dynamic_action per step, chained, with real fields', async () => {
+  const calls = [];
+  const fakeConnect = async () => ({
+    callTool: async (name, args) => {
+      calls.push([name, args]);
+      return { text: JSON.stringify({ enrollmentId: 'enr_1', taskIds: [`t_${calls.length}`] }), isError: false };
+    },
+  });
+  const p = await firsttouchProvider({ token: 'x', dryRun: false, connectImpl: fakeConnect });
+  const r = await p.createAction({
+    subject: { name: 'Jamie Rivers', email: 'jamie@acme.com', company_domain: 'acme.com' },
+    steps: [
+      { channel: 'email', copy: 'Hi Jamie', subject: 'Quick note' },
+      { channel: 'linkedin', copy: 'Following up' },
+    ],
+    ownerProviderId: 'usr_ada',
+  });
+  assert.deepEqual(r.task_ids, ['t_1', 't_2']);
+  assert.equal(r.enrollment_id, 'enr_1');
+
+  const [name0, a0] = calls[0];
+  assert.equal(name0, 'add_dynamic_action');
+  assert.equal(a0.action.type, 'email');
+  assert.equal(a0.action.isHumanApprovalRequired, true, 'must materialise a task, not auto-send');
+  assert.equal(a0.action.assignedUserId, 'usr_ada', 'sender is explicit — the wrong-owner bug');
+  assert.equal(a0.action.subjectType, 'new_thread');
+  assert.equal(a0.action.subject, 'Quick note');
+  assert.equal(a0.action.message, 'Hi Jamie');
+  assert.equal(a0.contact.firstName, 'Jamie');
+  assert.equal(a0.contact.lastName, 'Rivers', 'first+last are required by the real tool');
+  assert.equal(a0.company.domain, 'acme.com');
+  assert.equal(a0.enrollmentId, undefined, 'first step opens a new enrollment');
+
+  const [, a1] = calls[1];
+  assert.equal(a1.enrollmentId, 'enr_1', 'later steps chain onto the enrollment');
+  assert.equal(a1.action.type, 'linkedin_message');
+});
+
+test('enrolFlow sends the nested manualEnrollment shape', async () => {
+  const calls = [];
+  const fakeConnect = async () => ({
+    callTool: async (name, args) => { calls.push([name, args]); return { text: '{}', isError: false }; },
+  });
+  const p = await firsttouchProvider({ token: 'x', dryRun: false, connectImpl: fakeConnect });
+  await p.enrolFlow({ flow_id: 'flow_1', subject: { name: 'Sam Lee', email: 'sam@x.com', company_domain: 'x.com' } });
+  const [name, args] = calls[0];
+  assert.equal(name, 'add_manual_flow_enrollment');
+  assert.equal(args.flowPlanId, 'flow_1');
+  assert.equal(args.manualEnrollment.prospect.firstName, 'Sam');
+  assert.equal(args.manualEnrollment.prospect.lastName, 'Lee');
+  assert.equal(args.manualEnrollment.prospect.email, 'sam@x.com');
+  assert.equal(args.manualEnrollment.company.domain, 'x.com');
+});
+
+test('findAction filters by todo status and the owner', async () => {
+  const calls = [];
+  const fakeConnect = async () => ({
+    callTool: async (name, args) => {
+      calls.push([name, args]);
+      return { text: JSON.stringify({ tasks: [{ taskId: 'task_9' }] }), isError: false };
+    },
+  });
+  const p = await firsttouchProvider({ token: 'x', dryRun: false, connectImpl: fakeConnect });
+  const r = await p.findAction({ subject: { email: 'a@b.com' }, ownerProviderId: 'usr_1' });
+  assert.deepEqual(r.task_ids, ['task_9']);
+  assert.deepEqual(calls[0][1].statuses, ['todo']);
+  assert.equal(calls[0][1].assignedUserId, 'usr_1');
+});

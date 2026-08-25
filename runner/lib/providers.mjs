@@ -58,7 +58,8 @@ export async function firsttouchProvider({
     listEngagers: (args) => call('list_social_engagement_engagers', args ?? {}),
     // A HubSpot list PREVIEW returns hydrated contacts (name, email, title),
     // unlike raw membership which is bare ids — this is what a sweep needs.
-    previewList: ({ list_id, limit = 100 }) => call('preview_hubspot_list', { listId: list_id, limit }),
+    // (The live tool takes only listId.)
+    previewList: ({ list_id }) => call('preview_hubspot_list', { listId: list_id }),
     // Prospect discovery from ICP filters (chat campaigns like "VPs of Sales
     // in Nebraska").
     discoverContacts: (filters) => call('discover_contacts', filters ?? {}),
@@ -75,68 +76,149 @@ export async function firsttouchProvider({
     }),
 
     // --- the apply path (apply.mjs `platform` interface) ---
+    // Contracts verified against the live FirstTouch MCP tool schemas.
+
+    // Split a subject "name" into first/last — add_dynamic_action REQUIRES both
+    // on every action's effective identity, so we never send a bare name.
+    // eslint-disable-next-line no-inner-declarations
+
     async findAction({ subject, ownerProviderId }) {
+      // list_user_tasks: statuses defaults to ['todo']; filter by the same
+      // owner and match the prospect by email.
       const res = await call('list_user_tasks', {
-        assignedUserId: ownerProviderId, status: 'open',
+        assignedUserId: ownerProviderId, statuses: ['todo'],
+        email: subject?.email ?? undefined,
       });
       const tasks = Array.isArray(res?.tasks) ? res.tasks : [];
-      const key = (subject?.email || subject?.linkedin_url || '').toLowerCase();
-      const match = tasks.filter((t) =>
-        String(t.contactEmail || t.contactLinkedinUrl || '').toLowerCase() === key);
-      if (!match.length) return null;
-      return { task_ids: match.map((t) => t.id) };
+      if (!tasks.length) return null;
+      return { task_ids: tasks.map((t) => t.taskId ?? t.id).filter(Boolean) };
     },
 
+    // Create an approval-gated enrollment for one contact, one action per step,
+    // chained by enrollmentId. isHumanApprovalRequired:true materialises a task
+    // that does NOT execute until complete_task ("Approve & Run") — that two-
+    // phase shape is what lets the apply path verify before it sends.
     async createAction({ subject, steps, ownerProviderId }) {
-      const res = await call('add_dynamic_action', {
-        contact: {
-          name: subject.name, email: subject.email,
-          linkedinUrl: subject.linkedin_url, companyDomain: subject.company_domain,
-        },
-        // Approval mode plus explicit owner AND assignee: an action created
-        // without these lands on whoever the API token authenticates as, and
-        // sends one person's outreach from another person's account.
-        requiresApproval: true,
-        ownerId: ownerProviderId,
-        assignedUserId: ownerProviderId,
-        steps: steps.map((s) => ({ channel: s.channel, message: s.copy })),
-      });
-      const ids = res?.taskIds ?? res?.task_ids ??
-        (Array.isArray(res?.tasks) ? res.tasks.map((t) => t.id) : null);
-      if (!ids?.length) {
-        throw new Error(`add_dynamic_action returned no task ids (${JSON.stringify(res).slice(0, 200)})`);
+      const [firstName, ...rest] = String(subject.name ?? '').trim().split(/\s+/);
+      const lastName = rest.join(' ');
+      const contact = {
+        firstName: subject.first_name ?? firstName ?? undefined,
+        lastName: subject.last_name ?? (lastName || undefined),
+        email: subject.email ?? undefined,
+        linkedInUrl: subject.linkedin_url ?? undefined,
+        phone: subject.phone ?? undefined,
+      };
+      const company = subject.company_domain ? { domain: subject.company_domain } : undefined;
+
+      let enrollmentId = null;
+      const taskIds = [];
+      for (let i = 0; i < steps.length; i++) {
+        const s = steps[i];
+        const type = mapChannel(s.channel);
+        const action = {
+          type,
+          assignedUserId: ownerProviderId,
+          isHumanApprovalRequired: true,
+          message: type === 'linkedin_inmail' ? undefined : s.copy,
+          prompt: type === 'linkedin_inmail' ? s.copy : undefined,
+        };
+        if (type === 'email') {
+          // First email opens a new thread and needs a subject; later ones on
+          // the same enrollment reply and inherit it.
+          if (i === 0 || !enrollmentId) { action.subjectType = 'new_thread'; action.subject = s.subject ?? '(no subject)'; }
+          else { action.subjectType = 'reply'; }
+        }
+        const res = await call('add_dynamic_action', {
+          action,
+          contact,
+          company,
+          ownerId: ownerProviderId,
+          ...(enrollmentId ? { enrollmentId } : {}),
+        });
+        enrollmentId = res?.enrollmentId ?? enrollmentId;
+        const ids = res?.taskIds ?? (res?.taskId ? [res.taskId] : []);
+        for (const id of ids) if (id) taskIds.push(id);
+        // taskIdsPending/taskMaterializationStatus can defer id availability;
+        // the apply path re-reads via readTask, and findAction re-locates on a
+        // retry, so a briefly-empty taskIds does not lose the work.
       }
-      return { task_ids: ids };
+      if (!enrollmentId) {
+        throw new Error(`add_dynamic_action returned no enrollmentId (${JSON.stringify(steps).slice(0, 120)})`);
+      }
+      return { task_ids: taskIds, enrollment_id: enrollmentId };
     },
 
     async readTask(taskId) {
-      const res = await call('preview_task', { taskId });
+      const res = await call('preview_task', { taskId, includeProperties: true });
+      const task = res?.task ?? res;
+      const status = String(task?.status ?? '').toLowerCase();
+      // Copy lives in task.properties (PropertyValueDto[]); pull the message/
+      // body property if present. A null copy is tolerated by verifyAndComplete
+      // (we created the task WITH the approved copy, so it holds it by
+      // construction; the readback is belt, not the only brace).
+      const props = Array.isArray(task?.properties) ? task.properties : [];
+      const bodyProp = props.find((p) => /message|body|content/i.test(p?.name ?? p?.key ?? ''));
       return {
-        status: res?.status === 'completed' || res?.completed ? 'completed'
-          : res?.status === 'cancelled' ? 'cancelled' : 'open',
-        copy: res?.message ?? res?.copy ?? res?.body ?? null,
-        owner_provider_id: res?.ownerId ?? res?.assignedUserId ?? null,
+        status: status === 'done' ? 'completed' : status === 'canceled' || status === 'cancelled' ? 'cancelled' : 'open',
+        copy: bodyProp?.value ?? null,
+        owner_provider_id: task?.assignedUserId ?? task?.ownerId ?? null,
+        can_execute: res?.readiness?.canExecute ?? task?.readiness?.canExecute ?? true,
       };
     },
 
     completeTask: (taskId) => call('complete_task', { taskId }),
 
     async cancelAction(taskIds) {
+      // skip_task skips a todo task without cancelling the enrollment — good
+      // enough to stop a wrong-owner step from being actioned. (Full enrollment
+      // cancellation is cancel_flow_enrollments, used only when we hold an
+      // enrollmentId; a skipped un-executed task never sends regardless.)
       for (const taskId of taskIds) {
-        await call('skip_task', { taskId }).catch(() => {}); // best-effort cleanup
+        await call('skip_task', { taskId }).catch(() => {});
       }
     },
 
-    enrolFlow: ({ flow_id, subject, ownerProviderId }) => call('add_manual_flow_enrollment', {
-      flowPlanId: flow_id,
-      contact: {
-        name: subject.name, email: subject.email,
-        linkedinUrl: subject.linkedin_url, companyDomain: subject.company_domain,
-      },
-      ownerId: ownerProviderId,
-      assignedUserId: ownerProviderId,
-    }),
+    // Enrol into a DECLARED flow. Real shape: nested manualEnrollment with
+    // prospect/company; enrollmentMode omitted lets the flow's own strategy
+    // decide (a draft flow parks the contact in Awaiting).
+    enrolFlow: ({ flow_id, subject }) => {
+      const [firstName, ...rest] = String(subject.name ?? '').trim().split(/\s+/);
+      return call('add_manual_flow_enrollment', {
+        flowPlanId: flow_id,
+        manualEnrollment: {
+          prospect: {
+            firstName: subject.first_name ?? firstName ?? null,
+            lastName: subject.last_name ?? (rest.join(' ') || null),
+            linkedinUrl: subject.linkedin_url ?? null,
+            email: subject.email ?? null,
+            phone: subject.phone ?? null,
+          },
+          company: {
+            domain: subject.company_domain ?? null,
+            linkedinUrl: null,
+            linkedinId: null,
+          },
+        },
+      });
+    },
   };
+
+  // channel → FirstTouch action type.
+  function mapChannel(channel) {
+    switch (String(channel).toLowerCase()) {
+      case 'email': return 'email';
+      case 'linkedin':
+      case 'linkedin_message': return 'linkedin_message';
+      case 'linkedin_connect':
+      case 'connect': return 'linkedin_connect';
+      case 'linkedin_inmail':
+      case 'inmail': return 'linkedin_inmail';
+      case 'call': return 'call_task';
+      case 'task':
+      case 'manual': return 'manual_task';
+      default: return 'email';
+    }
+  }
 
   if (dryRun) {
     api.createAction = noMutations('create an action');
