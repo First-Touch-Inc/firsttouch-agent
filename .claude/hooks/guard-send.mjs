@@ -19,7 +19,7 @@
 // a permission decision on stdout.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 let raw = '';
@@ -61,8 +61,13 @@ function allowedFlowIds() {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const root = resolve(here, '..', '..');
-    const tenant = process.env.TENANT || 'tenant';
-    const path = join(root, 'config', `${tenant}.yaml`);
+    // Match the engine's config resolution: CONFIG_DIR (the writable volume in
+    // a container) or <root>/config, and AGENT_CONFIG (default 'agent').
+    const dir = process.env.CONFIG_DIR
+      ? (isAbsolute(process.env.CONFIG_DIR) ? process.env.CONFIG_DIR : resolve(root, process.env.CONFIG_DIR))
+      : join(root, 'config');
+    const name = process.env.AGENT_CONFIG || 'agent';
+    const path = join(dir, `${name}.yaml`);
     if (!existsSync(path)) return new Set();
 
     // Deliberately a line scan rather than a YAML parse: this hook must not

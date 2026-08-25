@@ -127,7 +127,7 @@ import { writeFileSync as wf, rmSync as rm, existsSync as ex, readFileSync as rf
 import { join as pj, dirname as pd } from 'node:path';
 
 const REPO = pj(pd(fileURLToPath(import.meta.url)), '..');
-const TENANT_CFG = pj(REPO, 'config', 'tenant.yaml');
+const TENANT_CFG = pj(REPO, 'config', 'agent.yaml');
 
 /** Put a config with one declared flow in place for the duration of a test. */
 function withFlows(ids, fn) {
