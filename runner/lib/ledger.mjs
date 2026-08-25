@@ -21,6 +21,8 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -195,6 +197,12 @@ export function registrableDomain(input) {
 }
 
 export function openLedger(path) {
+  // Ensure the parent directory exists — on a fresh volume /data/state does not
+  // yet exist and SQLite cannot create the file in a missing directory, which
+  // killed a clean container boot. (":memory:" has no directory.)
+  if (path !== ':memory:') {
+    try { mkdirSync(dirname(path), { recursive: true }); } catch { /* exists */ }
+  }
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
   // Additive migrations for databases created before a column existed. Each is
