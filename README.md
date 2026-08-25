@@ -71,7 +71,10 @@ tests (`npm test`, 170 of them):
 2. **Model access** — on any machine where you're logged into Claude:
    `claude setup-token` → copy the token. (Or use an Anthropic API key —
    set exactly one of the two; setting both is a startup error.)
-3. **FirstTouch token** — FirstTouch → Settings → API.
+3. **FirstTouch MCP token** — FirstTouch is connected over MCP, not a REST
+   API: one bearer token (`FT_MCP_TOKEN`) against `https://mcp.firsttouch.ai`,
+   the same MCP you'd add to Claude — grab it from your FirstTouch workspace's
+   MCP settings ([firsttouch.com/mcp](https://firsttouch.com/mcp)).
 4. **Deploy** — Railway, Fly, Render, or any Docker host:
 
    ```bash
