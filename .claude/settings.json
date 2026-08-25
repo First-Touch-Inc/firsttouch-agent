@@ -16,7 +16,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__outreach__.*|mcp__crm__.*",
+        "matcher": "mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -31,10 +31,20 @@
   "permissions": {
     "deny": [
       "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
       "WebFetch(domain:localhost)",
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./*-oauth.json)"
+      "WebFetch(domain:127.0.0.1)",
+      "Read(/proc/**)",
+      "Read(/sys/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*-oauth.json)",
+      "Read(**/*.db)",
+      "Read(**/.run/**)",
+      "Glob(**/.run/**)",
+      "Grep(**/.run/**)"
     ]
   }
 }

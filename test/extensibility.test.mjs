@@ -184,16 +184,22 @@ test('a literal token in token_env is refused — secrets do not belong in confi
   assert.match(p, /never the token itself/);
 });
 
-test('a mutating external tool needs allow_mutations: true, explicitly', () => {
+test('a mutating external tool is refused outright — v1 external tools are READ-ONLY', () => {
+  // External tools bypass the approval loop, owner routing and suppression, so
+  // a mutating one is an unreviewed send. There is no allow_mutations escape.
   const cfg = baseCfg();
-  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com',
-    token_env: 'X_TOKEN', allow: ['send_message'] }];
-  const p = validateConfig(cfg).join('\n');
-  assert.match(p, /allow_mutations/);
-  assert.match(p, /bypass this agent's approval loop/);
+  for (const name of ['send_message', 'create_contact', 'add_to_sequence', 'enrollLead', 'trigger_workflow']) {
+    cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: [name] }];
+    assert.match(validateConfig(cfg).join('\n'), /READ tools only/, `${name} must be refused`);
+  }
+  // A read tool is fine.
+  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: ['search_people', 'get_transcript'] }];
+  assert.deepEqual(validateConfig(cfg), []);
 
-  cfg.external_tools[0].allow_mutations = true;
-  assert.deepEqual(validateConfig(cfg), [], 'the explicit flag makes it valid');
+  // allow_mutations is no longer an escape hatch — it does not make a send valid.
+  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN',
+    allow: ['send_message'], allow_mutations: true }];
+  assert.match(validateConfig(cfg).join('\n'), /READ tools only/);
 });
 
 test('an empty allow list is refused — there is no wildcard', () => {

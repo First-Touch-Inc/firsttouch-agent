@@ -243,6 +243,7 @@ providers = await loadExtraAdapters(providers, cfg);
 const core = new ToolCore({
   cfg, ledger, mode,
   motionId: process.env.AGENT_MOTION_ID || null,
+  isOperator: process.env.AGENT_IS_OPERATOR === '1',
   providers,
 });
 

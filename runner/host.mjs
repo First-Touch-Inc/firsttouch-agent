@@ -26,11 +26,10 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { loadConfig, checkEnvironment, ConfigError, ROOT } from './lib/config.mjs';
+import { loadConfig, checkEnvironment, resolveStateDir, ConfigError, ROOT } from './lib/config.mjs';
 import { openLedger } from './lib/ledger.mjs';
 import { applyWorkItem, applyCampaignTick, expireDueItems } from './lib/apply.mjs';
 import { handleBlockAction, handleViewSubmission, renderCard, ownerSlackIdFor } from './lib/decide.mjs';
@@ -176,7 +175,7 @@ async function pumpSpawns() {
   }
 }
 
-function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }) {
+function runClaude({ prompt, mode, motionId = null, isOperator = false, timeoutMs = 45 * 60 * 1000 }) {
   return new Promise((resolve) => {
     // A distill turn studies human-typed text and answers with JSON: it gets
     // NO tools and NO MCP at all — the strongest possible sandbox for the one
@@ -185,7 +184,13 @@ function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }
 
     // For every other mode, the agent tool server is the ONLY MCP server,
     // and it — not the model — receives the credentials.
-    const mcpPath = join(tmpdir(), `agent-mcp-${randomUUID()}.json`);
+    //
+    // The mcp-config file names the token ENV VARS the tool server should get;
+    // Claude sets them on the spawned server only, never on the model process.
+    // The file itself still lists them, so it lives in a locked run dir that
+    // the model's Read/Glob is denied (see .claude/settings.json), not in a
+    // world-listable tmp dir.
+    const mcpPath = join(runDir(), `agent-mcp-${randomUUID()}.json`);
     writeFileSync(mcpPath, JSON.stringify({
       mcpServers: isDistill ? {} : {
         agent: {
@@ -196,6 +201,8 @@ function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }
             AGENT_SESSION_MODE: mode,
             ...(motionId ? { AGENT_MOTION_ID: motionId } : {}),
             AGENT_CONFIG: cfg.__meta.name,
+            AGENT_IS_OPERATOR: isOperator ? '1' : '0',
+            DRY_RUN: process.env.DRY_RUN === '1' ? '1' : '0',
             FT_MCP_TOKEN: process.env.FT_MCP_TOKEN ?? '',
             HUBSPOT_ACCESS_TOKEN: process.env.HUBSPOT_ACCESS_TOKEN ?? '',
             STATE_DIR: process.env.STATE_DIR ?? '',
@@ -210,14 +217,34 @@ function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }
       },
     }, null, 2), { mode: 0o600 });
 
-    const builtins = isDistill ? 'TodoWrite' : 'Read,Glob,Grep,WebSearch,WebFetch,TodoWrite';
+    // Web egress is the exfiltration channel, and MOTION/DISTILL sessions are
+    // the ones that read the most attacker-controlled text (bios, CRM notes,
+    // transcripts). They get NO WebSearch/WebFetch — they research through the
+    // enrichment and CRM tools, which are scoped and logged. Only operator-
+    // driven chat/onboarding keep web research, where the operator is present.
+    const webForMode = (mode === 'chat' || mode === 'onboarding');
+    const builtins = isDistill ? 'TodoWrite'
+      : webForMode ? 'Read,Glob,Grep,WebSearch,WebFetch,TodoWrite'
+      : 'Read,Glob,Grep,TodoWrite';
+    const allowed = isDistill ? 'TodoWrite'
+      : webForMode ? 'mcp__agent__*,Read,Glob,Grep,WebSearch,WebFetch'
+      : 'mcp__agent__*,Read,Glob,Grep';
+    const denied = ['Bash', 'Write', 'Edit', 'NotebookEdit']
+      .concat(webForMode ? [] : ['WebFetch', 'WebSearch'])
+      // Never let a session read the credential run dir, the ledger, or the
+      // process environment — belt to the run-dir placement's braces.
+      .concat([
+        `Read(${runDir()}/**)`, `Glob(${runDir()}/**)`, `Grep(${runDir()}/**)`,
+        'Read(/proc/**)', 'Read(/sys/**)', 'Read(**/*.db)', 'Read(**/.env*)',
+        'WebFetch(domain:localhost)', 'WebFetch(domain:127.0.0.1)',
+      ]);
     const args = [
       '-p', prompt,
       '--output-format', 'json',
       '--permission-mode', 'acceptEdits',
       '--tools', builtins,
-      '--allowedTools', isDistill ? 'TodoWrite' : 'mcp__agent__*,Read,Glob,Grep,WebSearch,WebFetch',
-      '--disallowedTools', 'Bash,Write,Edit,NotebookEdit' + (isDistill ? ',WebFetch,WebSearch' : ''),
+      '--allowedTools', allowed,
+      '--disallowedTools', denied.join(','),
       '--mcp-config', mcpPath,
       '--strict-mcp-config',
     ];
@@ -244,16 +271,38 @@ function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }
   });
 }
 
-/** The model's environment: the host env MINUS every credential. The tool
- *  server gets tokens explicitly (above); the model itself gets none. */
+/** The model's environment: the host env MINUS every credential — the named
+ *  ones AND every external-tool token_env AND anything that looks secret. The
+ *  tool server gets its tokens through the mcp-config env block; the model's
+ *  own process gets none, so /proc/self/environ carries nothing. */
 function modelEnv() {
   const strip = new Set([
     'FT_MCP_TOKEN', 'HUBSPOT_ACCESS_TOKEN', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
     'SERPER_API_KEY', 'SCRAPECREATORS_API_KEY',
+    'ANTHROPIC_API_KEY', // if present it must not leak; the CLI uses its own auth
+    ...(cfg.external_tools ?? []).map((t) => t.token_env),
   ]);
+  const looksSecret = /(TOKEN|SECRET|API_?KEY|PASSWORD|CREDENTIAL|BEARER|ACCESS_?KEY|PRIVATE)/i;
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!strip.has(k)) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (strip.has(k)) continue;
+    if (looksSecret.test(k) && k !== 'CLAUDE_CODE_OAUTH_TOKEN') continue; // OAuth token needed by the CLI itself
+    env[k] = v;
+  }
   return env;
+}
+
+/** A locked directory for the credential-bearing mcp-config files. Under
+ *  STATE_DIR so it is on the writable volume, chmod 700 so only this uid can
+ *  list it, and deny-listed from the model's Read/Glob above. */
+let _runDir = null;
+function runDir() {
+  if (_runDir) return _runDir;
+  const dir = join(resolveStateDir(), '.run');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { chmodSync(dir, 0o700); } catch {}
+  _runDir = dir;
+  return dir;
 }
 
 // --- prompts -----------------------------------------------------------------
@@ -319,7 +368,7 @@ async function runChat(text, user, channel, thread) {
     `each lands as an approval card. ${isOperator ? 'The operator may also ask you to update config or plays via set_config/write_play.' : 'Config and play changes are operator-only; decline politely.'}`,
     `If a tool refuses, relay the reason honestly.`,
   ].join('\n');
-  const res = await queueSpawn({ prompt, mode: 'chat', timeoutMs: 8 * 60 * 1000 });
+  const res = await queueSpawn({ prompt, mode: 'chat', isOperator, timeoutMs: 8 * 60 * 1000 });
   await say(channel, (res.result || res.error || 'I produced no answer, which is a bug.').slice(0, 3800), thread);
 }
 
@@ -479,7 +528,7 @@ async function handleEvent(ev) {
       `set_config and the voice pack via write_voice_pack → finish by proposing a supervised dry run.`,
       `Open by proving what already works (list_team_members). Reply now with ONLY your first message.`,
     ].join('\n');
-    const res = await queueSpawn({ prompt, mode: 'onboarding', timeoutMs: 8 * 60 * 1000 });
+    const res = await queueSpawn({ prompt, mode: 'onboarding', isOperator: true, timeoutMs: 8 * 60 * 1000 });
     await say(ev.channel, (res.result || res.error || '').slice(0, 3800), ev.thread_ts || ev.ts);
     return;
   }

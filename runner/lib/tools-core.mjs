@@ -54,13 +54,18 @@ export class ToolCore {
    *   writeWorkspaceFile(relPath, content)                (plays / voice)
    * @param now       clock, injectable for tests
    */
-  constructor({ cfg, ledger, mode, motionId = null, providers, now = () => new Date() }) {
+  constructor({ cfg, ledger, mode, motionId = null, providers, isOperator = false, now = () => new Date() }) {
     if (!MODES.includes(mode)) throw new ToolError(`unknown mode "${mode}"`);
     this.cfg = cfg;
     this.ledger = ledger;
     this.mode = mode;
     this.motionId = motionId;
     this.p = providers;
+    // Config and play writes are operator-only IN CODE, not by prompt. The
+    // host sets this from Slack's authenticated user id; a motion session is
+    // never the operator (nobody is driving it), and a non-operator chat user
+    // gets the tools refused even though they are exposed.
+    this.isOperator = Boolean(isOperator);
     this.now = now;
     this.enrichmentSpent = 0;
 
@@ -474,21 +479,40 @@ export class ToolCore {
     'approval_routing.approval_overrides',
     'providers.outreach.kind',
     'providers.crm.kind',
+    // external_tools MOUNTS a credentialed tool source: a write here can point
+    // a "tool server" at an attacker host with a real token_env and exfiltrate
+    // the bearer on the next spawn. It is operator-config-file only, never a
+    // tool write — the same class as approval_overrides.
+    'external_tools',
+    // provider/data-source endpoints and the tenant's identity are repoint
+    // targets; a config write must never move where data or sends go.
+    'providers.crm.mcp_url',
+    'providers.outreach.mcp_url',
   ];
 
   _set_config({ patch }) {
-    if (!patch || typeof patch !== 'object') return { refused: 'patch must be an object of config paths to values' };
+    if (this.mode === 'motion') return { refused: 'config cannot be written from a scheduled run' };
+    if (!this.isOperator) {
+      return { refused: 'only the operator may change config — this is enforced in code, not just asked' };
+    }
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      return { refused: 'patch must be an object of config paths to values' };
+    }
 
-    for (const path of Object.keys(flatten(patch))) {
+    // flattenDeep walks ARRAYS too, so external_tools[0].url and any other
+    // nested repoint target is actually visited. The array-as-leaf version of
+    // this check was a verified token-exfiltration hole.
+    for (const path of Object.keys(flattenDeep(patch))) {
+      const bare = path.replace(/\.\d+(\.|$)/g, '$1'); // drop array indices for matching
       for (const protectedPath of ToolCore.PROTECTED_CONFIG) {
-        if (path === protectedPath || path.startsWith(`${protectedPath}.`)) {
-          return { refused: `"${protectedPath}" cannot be written by the agent — it is operator-only` };
+        if (bare === protectedPath || bare.startsWith(`${protectedPath}.`)) {
+          return { refused: `"${protectedPath}" cannot be written by a tool — it is operator-config-file only` };
         }
       }
-      // Any dashboard/provider URL change repoints a data source; that is a
-      // confirmed-button operation on a host-posted card, not a config write.
-      if (/(^|\.)(base_url|mcp_url|url)$/.test(path)) {
-        return { refused: `"${path}" repoints a data source — it needs the operator to confirm a card the host posts, not a config write` };
+      // Any endpoint/URL anywhere in the patch repoints a data source or send
+      // target. That is a confirmed-button operation, never a config write.
+      if (/(^|\.)(base_url|mcp_url|url|token_env|endpoint|host)$/.test(bare)) {
+        return { refused: `"${path}" points at an endpoint or a credential source — that needs operator confirmation on a host-posted card, not a config write` };
       }
     }
 
@@ -498,10 +522,11 @@ export class ToolCore {
       return { refused: `the patched config would be invalid:\n${problems.map((p) => `- ${p}`).join('\n')}` };
     }
     this.p.writeConfig(candidate);
-    return { written: true, keys: Object.keys(flatten(patch)) };
+    return { written: true, keys: Object.keys(flattenDeep(patch)) };
   }
 
   _write_play({ filename, content }) {
+    if (!this.isOperator) return { refused: 'only the operator may write plays' };
     const check = workspaceFilename(filename, '.md');
     if (check.refused) return check;
     if (!content || !String(content).trim()) return { refused: 'a play needs content' };
@@ -510,6 +535,7 @@ export class ToolCore {
   }
 
   _write_voice_pack({ content }) {
+    if (!this.isOperator) return { refused: 'only the operator may rewrite the voice pack' };
     if (!content || !String(content).trim()) return { refused: 'the voice pack needs content' };
     this.p.writeWorkspaceFile('voice-pack.md', String(content));
     return { written: 'voice-pack.md' };
@@ -537,11 +563,17 @@ function stripMeta(cfg) {
   return rest;
 }
 
-function flatten(obj, prefix = '') {
+/** Flatten to dotted paths, DESCENDING INTO ARRAYS (index as a segment). The
+ *  object-only version let a url nested in an array element slip past the
+ *  config guard — a verified token-exfiltration hole. */
+function flattenDeep(obj, prefix = '') {
   const out = {};
-  for (const [k, v] of Object.entries(obj)) {
+  const entries = Array.isArray(obj)
+    ? obj.map((v, i) => [String(i), v])
+    : Object.entries(obj);
+  for (const [k, v] of entries) {
     const path = prefix ? `${prefix}.${k}` : k;
-    if (v && typeof v === 'object' && !Array.isArray(v)) Object.assign(out, flatten(v, path));
+    if (v && typeof v === 'object') Object.assign(out, flattenDeep(v, path));
     else out[path] = v;
   }
   return out;
