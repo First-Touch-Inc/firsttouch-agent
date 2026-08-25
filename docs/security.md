@@ -131,6 +131,47 @@ If you fork this and change the harness, port `test/guard-send.test.mjs` and mak
 it pass. If you cannot, you have removed the control and the claims in this
 document no longer describe your deployment.
 
+## What is enforced in code, and what is not
+
+Read this before deciding how much to trust the defaults. The distinction
+matters more than any individual control: an instruction is something a model
+usually follows, and a control is something it cannot get around.
+
+**Enforced in code — these hold regardless of what any prompt says:**
+
+| Control | Where |
+|---|---|
+| No direct sends; approval flag required; owner required | `.claude/hooks/guard-send.mjs` |
+| No authoring or publishing a flow; no enrolling into an undeclared one | same |
+| A dry run creates nothing | same |
+| Approve buttons: only the owner, or a named override | `runner/lib/approvals.mjs` |
+| CRM writes off unless `CRM_WRITES_ENABLED=1`; forced off in chat and dry runs | `runner/mcp/hubspot-server.mjs`, `run-daily.mjs` |
+| No `Bash` in a scheduled run; no `Bash`/`Write`/`Edit` in chat | tool allowlists |
+| Placeholder or missing tenant values refuse to start | `runner/lib/config.mjs` |
+| Hard wall-clock kill on a run | `RUN_TIMEOUT_MS` |
+| No credential or prospect data in git | CI |
+
+**Instruction only — the model is told, but nothing stops it:**
+
+| Not enforced | Consequence if the model gets it wrong |
+|---|---|
+| `limits.*` — per-day and per-week channel volume | It could exceed your sending ceiling |
+| `do_not_contact` — the opt-out list | Someone who asked you to stop could be contacted |
+| `suppression` — customers, open deals, live sequences | You could prospect your own customer |
+| `dedupe.rework_cooldown_days` | Someone could be worked twice |
+| `sender_identity` — postal address, unsubscribe URL | An email could go out missing what the law requires |
+| `caps.max_per_day` | A run could produce more than you intended |
+
+Those six are the compliance-relevant ones, which is exactly why the gap is
+worth stating plainly rather than burying. They work in practice because the
+model follows its instructions and because every prospect-facing action still
+stops at a human — but they are not guarantees, and you should not describe them
+to your own legal or security reviewers as if they were.
+
+If you need them to be guarantees, they belong in the send guard alongside the
+approval and ownership checks. That is a known and deliberate gap, not an
+oversight, and it is the first thing to close for a larger deployment.
+
 ## The send guard
 
 The README says the agent never writes a message and sends it.

@@ -442,8 +442,13 @@ limits:
 
 # -----------------------------------------------------------------------------
 # Required in commercial email in most jurisdictions: a real postal address and
-# a working opt-out. The agent injects both into every email it drafts, and
-# refuses to draft email at all if they are blank.
+# a working opt-out. The agent is instructed to inject both into every email it
+# drafts.
+#
+# HONEST LIMITATION: this is currently instruction, not enforcement. Nothing in
+# code checks these before a draft is created, the way the send guard checks
+# approval and ownership. Fill them in and verify them in your dry run — do not
+# treat a blank here as something the software will catch for you.
 # -----------------------------------------------------------------------------
 sender_identity:
   legal_entity_name: ""
