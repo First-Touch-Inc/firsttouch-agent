@@ -468,6 +468,7 @@ async function updateCardMessage(item, extra = {}) {
 
 // --- the tick loop -----------------------------------------------------------
 const TICK_MS = 5000;
+const APPLY_ATTEMPT_CAP = 12; // ~1 min of 5s ticks before giving up on a stuck send
 let lastScheduleCheck = 0;
 let lastLearnCheck = 0;
 
@@ -521,6 +522,17 @@ async function tickBody() {
       "SELECT id FROM work_items WHERE status = 'applying'").all();
     for (const { id } of dripping) {
       const item = ledger.getWorkItem(id);
+      // Bound retries: a permanently-failing send (a bad task the platform
+      // rejects every time) must not loop silently forever. After the cap it
+      // goes to 'conflict' with a one-time alert for a human to look at.
+      const attempts = ledger.bumpApplyAttempts(id);
+      if (attempts > APPLY_ATTEMPT_CAP && !item.payload.campaign) {
+        ledger.setWorkItemStatus(id, 'conflict');
+        await updateCardMessage(ledger.getWorkItem(id));
+        await say(item.slack_channel ?? cfg.approval.digest_channel,
+          `⚠️ gave up applying this after ${attempts} tries — left it unsent for you to check.`, item.slack_ts);
+        continue;
+      }
       const r = item.payload.campaign
         ? await applyCampaignTick({ ledger, cfg, item, platform, now: () => new Date() })
         : await applyWorkItem({ ledger, cfg, workItemId: id, platform, crm, now: () => new Date() });

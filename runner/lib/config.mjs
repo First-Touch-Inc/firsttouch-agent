@@ -408,21 +408,25 @@ export function validateConfig(cfg) {
       problems.push('external_tools must be a list.');
     } else {
       const names = new Set();
-      // Verbs that act on the outside world. Split each tool name into words
-      // (snake_case AND camelCase) and refuse if ANY word is a mutating verb —
-      // a word-split is a more robust denylist than a regex that camelCase or
-      // an unusual separator can slip past.
-      const MUTATING_VERBS = new Set([
-        'send', 'create', 'add', 'enroll', 'enrol', 'update', 'set', 'delete',
-        'remove', 'write', 'post', 'publish', 'pay', 'transfer', 'execute',
-        'run', 'start', 'launch', 'trigger', 'invite', 'upload', 'append',
-        'upsert', 'complete', 'approve', 'cancel', 'archive', 'merge', 'import',
-        'bulk', 'move', 'assign', 'schedule', 'push', 'sync', 'apply',
+      // External tools bypass the approval loop, so v1 allows READ tools only.
+      // A denylist of mutating verbs fails OPEN — an unlisted verb like
+      // place_order or charge_card slips through. So this is an ALLOWLIST that
+      // fails CLOSED: a tool is permitted only if its FIRST word is a known
+      // read verb. Anything else — including any ambiguous name — is refused
+      // with a message telling the operator to confirm it is read-only.
+      const READ_VERBS = new Set([
+        'get', 'list', 'search', 'find', 'lookup', 'read', 'fetch', 'query',
+        'preview', 'check', 'count', 'show', 'describe', 'enrich', 'resolve',
+        'view', 'scan', 'inspect', 'summarize', 'summarise', 'analyze', 'analyse',
+        'match', 'discover', 'export', 'download',
       ]);
       const words = (name) => String(name)
         .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
         .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-      const looksMutating = (name) => words(name).some((w) => MUTATING_VERBS.has(w));
+      const isReadOnly = (name) => {
+        const w = words(name);
+        return w.length > 0 && READ_VERBS.has(w[0]);
+      };
       for (const t of cfg.external_tools) {
         const name = t?.name ?? '(unnamed)';
         if (!/^[a-z][a-z0-9_]{0,30}$/.test(String(t?.name ?? ''))) {
@@ -447,17 +451,19 @@ export function validateConfig(cfg) {
           );
         } else {
           // v1: external tools are READ-ONLY. They bypass this agent's approval
-          // loop, its owner routing and its suppression/caps entirely, so a
-          // mutating external tool is an unreviewed send. Anything whose name
-          // reads like a mutation is refused outright — no allow_mutations
-          // escape hatch until such calls also go through a work item.
+          // loop, owner routing and suppression/caps entirely, so a mutating
+          // external tool is an unreviewed send. A name is allowed only if it
+          // begins with a known READ verb — this fails CLOSED, so an unknown or
+          // ambiguous name (place_order, charge_card, foo) is refused rather
+          // than assumed safe.
           for (const toolName of t.allow) {
-            if (looksMutating(toolName)) {
+            if (!isReadOnly(toolName)) {
               problems.push(
-                `external_tools "${name}": tool "${toolName}" looks like it acts on the outside ` +
-                `world (send/create/add/enroll/delete/…). External tools bypass this agent's ` +
-                `approval loop, so v1 allows READ tools only. Use a play + the agent's own ` +
-                `approval-gated tools to act, not a raw external mutation.`,
+                `external_tools "${name}": tool "${toolName}" is not recognisably a read tool ` +
+                `(its name must start with a read verb like get/list/search/find/read/query/` +
+                `preview/enrich). External tools bypass this agent's approval loop, so v1 allows ` +
+                `READ tools only — rename it if it is a read, or act through a play and the ` +
+                `agent's own approval-gated tools instead of a raw external call.`,
               );
             }
           }

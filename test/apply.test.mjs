@@ -468,3 +468,13 @@ test('an undo that lands first prevents the applier from claiming', () => {
   assert.equal(ledger.cancelPendingIntent(id), true, 'the undo wins');
   assert.equal(ledger.claimIntent(intent.id), false, 'the applier cannot claim a cancelled intent');
 });
+
+// --- bounded apply-attempts (re-QA N: no silent infinite retry) --------------
+
+test('apply attempts increment and can be read for a retry cap', () => {
+  const ledger = openLedger(':memory:');
+  const id = stageOutreach(ledger);
+  assert.equal(ledger.bumpApplyAttempts(id), 1);
+  assert.equal(ledger.bumpApplyAttempts(id), 2);
+  assert.equal(ledger.getWorkItem(id).apply_attempts, 2);
+});

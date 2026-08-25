@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   slack_channel TEXT,
   slack_ts      TEXT,
   expires_at    TEXT NOT NULL,
+  apply_attempts INTEGER NOT NULL DEFAULT 0,  -- bounds retry of a stuck 'applying'
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_work_pending ON work_items(status, slack_ts);
@@ -196,6 +197,13 @@ export function registrableDomain(input) {
 export function openLedger(path) {
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
+  // Additive migrations for databases created before a column existed. Each is
+  // idempotent (ALTER throws "duplicate column" if already present — ignored).
+  for (const alter of [
+    'ALTER TABLE work_items ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0',
+  ]) {
+    try { db.exec(alter); } catch { /* column already exists */ }
+  }
   return new Ledger(db);
 }
 
@@ -454,6 +462,13 @@ export class Ledger {
   setWorkItemTaskIds(id, taskIds) {
     this.db.prepare('UPDATE work_items SET task_ids = ? WHERE id = ?')
       .run(JSON.stringify(taskIds ?? []), id);
+  }
+
+  /** Increment and return the apply-attempt count — used to bound retries of a
+   *  stuck 'applying' item so a permanently-failing send cannot loop forever. */
+  bumpApplyAttempts(id) {
+    this.db.prepare('UPDATE work_items SET apply_attempts = apply_attempts + 1 WHERE id = ?').run(id);
+    return this.db.prepare('SELECT apply_attempts n FROM work_items WHERE id = ?').get(id)?.n ?? 0;
   }
 
   /** Record a decision. slack_event_id is UNIQUE so a Slack retry of the same

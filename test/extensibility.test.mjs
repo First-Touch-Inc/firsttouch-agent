@@ -184,19 +184,24 @@ test('a literal token in token_env is refused — secrets do not belong in confi
   assert.match(p, /never the token itself/);
 });
 
-test('a mutating external tool is refused outright — v1 external tools are READ-ONLY', () => {
-  // External tools bypass the approval loop, owner routing and suppression, so
-  // a mutating one is an unreviewed send. There is no allow_mutations escape.
+test('external tools use a READ-verb ALLOWLIST that fails closed', () => {
+  // A denylist of mutating verbs fails open — place_order/charge_card slip
+  // through. The allowlist refuses anything not starting with a read verb.
   const cfg = baseCfg();
-  for (const name of ['send_message', 'create_contact', 'add_to_sequence', 'enrollLead', 'trigger_workflow']) {
+  for (const name of [
+    'send_message', 'create_contact', 'add_to_sequence', 'enrollLead', 'trigger_workflow',
+    'place_order', 'charge_card', 'subscribe_profile_to_marketing', 'submit_form',
+    'do_thing', 'foo', 'process_payment',           // ambiguous/unknown → refused
+  ]) {
     cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: [name] }];
     assert.match(validateConfig(cfg).join('\n'), /READ tools only/, `${name} must be refused`);
   }
-  // A read tool is fine.
-  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: ['search_people', 'get_transcript'] }];
-  assert.deepEqual(validateConfig(cfg), []);
-
-  // allow_mutations is no longer an escape hatch — it does not make a send valid.
+  // Read verbs (snake and camel) are fine.
+  for (const reads of [['search_people', 'get_transcript'], ['listCalls', 'findContact'], ['enrich_company']]) {
+    cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: reads }];
+    assert.deepEqual(validateConfig(cfg), [], `${reads.join(',')} should be allowed`);
+  }
+  // allow_mutations is not an escape hatch.
   cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN',
     allow: ['send_message'], allow_mutations: true }];
   assert.match(validateConfig(cfg).join('\n'), /READ tools only/);
