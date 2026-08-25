@@ -29,6 +29,7 @@ import { createServer } from 'node:net';
 import { writeFileSync, readFileSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { load as loadYaml, dump as dumpYaml } from 'js-yaml';
 import { loadConfig, checkEnvironment, resolveStateDir, ConfigError, ROOT } from './lib/config.mjs';
 import { openLedger } from './lib/ledger.mjs';
 import { applyWorkItem, applyCampaignTick, expireDueItems } from './lib/apply.mjs';
@@ -68,6 +69,14 @@ if (!APP_TOKEN || !BOT_TOKEN) {
 }
 
 const ledger = openLedger(cfg.__meta.ledgerPath);
+
+// Crash recovery: reset any intent left mid-application by a dead process so
+// the next tick re-drives it (apply is idempotent). Without this an approval
+// claimed just before an OOM would be silently lost.
+{
+  const recovered = ledger.recoverInflightIntents();
+  if (recovered) log(`recovered ${recovered} in-flight intent(s) from a prior crash`);
+}
 
 // --- single-instance lock ----------------------------------------------------
 const LOCK_PORT = Number(process.env.HOST_LOCK_PORT || 41739);
@@ -128,12 +137,11 @@ if (!operator) {
 
 function writeOperator(userId) {
   // Host-side direct write: the ONE path that may set slack.operator.
-  // (set_config refuses it, by design.)
-  const raw = readFileSync(cfg.__meta.path, 'utf8');
-  const updated = /^slack:\s*$/m.test(raw)
-    ? raw.replace(/^(slack:\s*\n(?:\s+.*\n)*?)\s*operator:.*$/m, `$1  operator: "${userId}"`)
-    : `${raw}\nslack:\n  operator: "${userId}"\n`;
-  writeFileSync(cfg.__meta.path, updated);
+  // (set_config refuses it, by design.) Parse → set → dump with js-yaml
+  // rather than regex surgery, which mangled configs with unusual formatting.
+  const doc = loadYaml(readFileSync(cfg.__meta.path, 'utf8')) ?? {};
+  doc.slack = { ...(doc.slack ?? {}), operator: userId };
+  writeFileSync(cfg.__meta.path, dumpYaml(doc, { lineWidth: 100 }));
   cfg.slack = { ...(cfg.slack ?? {}), operator: userId };
   operator = userId;
   claimCode = null;
@@ -277,17 +285,23 @@ function runClaude({ prompt, mode, motionId = null, isOperator = false, timeoutM
  *  tool server gets its tokens through the mcp-config env block; the model's
  *  own process gets none, so /proc/self/environ carries nothing. */
 function modelEnv() {
+  // The model process is the `claude` CLI; it MUST keep its own Anthropic auth
+  // (OAuth token OR API key) or it cannot run. That credential only lets it be
+  // the model — it is not a provider/Slack/CRM token it could use to act on the
+  // outside world — so keeping it is safe and necessary. Everything else that
+  // grants outward power is stripped.
+  const KEEP = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']);
   const strip = new Set([
     'FT_MCP_TOKEN', 'HUBSPOT_ACCESS_TOKEN', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',
     'SERPER_API_KEY', 'SCRAPECREATORS_API_KEY',
-    'ANTHROPIC_API_KEY', // if present it must not leak; the CLI uses its own auth
     ...(cfg.external_tools ?? []).map((t) => t.token_env),
   ]);
   const looksSecret = /(TOKEN|SECRET|API_?KEY|PASSWORD|CREDENTIAL|BEARER|ACCESS_?KEY|PRIVATE)/i;
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
+    if (KEEP.has(k)) { env[k] = v; continue; }
     if (strip.has(k)) continue;
-    if (looksSecret.test(k) && k !== 'CLAUDE_CODE_OAUTH_TOKEN') continue; // OAuth token needed by the CLI itself
+    if (looksSecret.test(k)) continue;
     env[k] = v;
   }
   return env;
@@ -353,8 +367,7 @@ async function refreshSuppressions(reason) {
   });
   if (summary.crm_error) {
     await say(cfg.approval.digest_channel,
-      `⚠️ could not refresh customer suppression from the CRM (${summary.crm_error}) — ` +
-      `keeping the previous list; a run will still not prospect anyone already suppressed.`);
+      `⚠️ could not refresh customer suppression from the CRM (${summary.crm_error}).`);
   }
   log(`suppressions seeded (${reason}): ${JSON.stringify(summary)}`);
   return summary;
@@ -363,12 +376,22 @@ async function refreshSuppressions(reason) {
 async function runMotion(motion, { dry = false } = {}) {
   log(`motion ${motion.id} starting${dry ? ' (dry)' : ''}`);
   // Seed BEFORE the sweep so today's customers/DNC are in the table the
-  // agent's tools check. If this throws, the motion does not run — better a
-  // skipped day than prospecting the customer base.
+  // agent's tools check. If the seed throws, OR the CUSTOMER query errored (so
+  // we cannot confirm who is a customer), the motion does not run — a short
+  // day beats prospecting the customer base. Motions that don't prospect
+  // net-new people (deal follow-up, CS) may proceed on a customer-query error.
+  let seed;
   try {
-    await refreshSuppressions(`before ${motion.id}`);
+    seed = await refreshSuppressions(`before ${motion.id}`);
   } catch (e) {
     await say(cfg.approval.digest_channel, `⚠️ ${motion.id} skipped: suppression seed failed (${e.message}).`);
+    return;
+  }
+  const prospectsNetNew = motion.kind === 'outbound' || motion.kind === 'inbound';
+  if (seed.crm_error && prospectsNetNew) {
+    await say(cfg.approval.digest_channel,
+      `⚠️ ${motion.id} skipped: could not confirm the customer/suppression list from the CRM ` +
+      `(${seed.crm_error}). Refusing to prospect net-new until it is reachable.`);
     return;
   }
   const prompt = [
@@ -755,10 +778,15 @@ async function socketLoop() {
 }
 
 log(`host up — client=${JSON.stringify(cfg.client.name)} motions=${cfg.__meta.enabledMotions.map((m) => m.id).join(',') || 'none'}`);
-// Seed suppressions once at boot so chat-driven work is protected immediately,
-// not only after the first scheduled motion. Non-fatal: a boot-time CRM
-// hiccup must not stop the host from coming up to serve approvals.
-refreshSuppressions('boot').catch((e) => log(`boot suppression seed failed: ${e.message}`));
+// Seed suppressions AT BOOT, awaited BEFORE the socket opens, so no chat turn
+// can stage work against an empty table in the seeding window. A boot-time CRM
+// hiccup still lets the host come up (it must serve approvals), but the boot
+// seed being incomplete is recorded so the first chat/motion re-seeds.
+try {
+  await refreshSuppressions('boot');
+} catch (e) {
+  log(`boot suppression seed failed (will re-seed before each motion): ${e.message}`);
+}
 while (true) {
   try {
     await socketLoop();

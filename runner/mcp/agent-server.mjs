@@ -314,7 +314,13 @@ async function handle(msg) {
   if (id !== undefined) return replyError(id, -32601, `Method not found: ${method}`);
 }
 
+// Process messages STRICTLY ONE AT A TIME. Tool calls touch the shared SQLite
+// ledger (including multi-statement transactions like reserveTouch's BEGIN
+// IMMEDIATE); handling two concurrently could interleave a transaction with
+// another call's writes. A serial queue keeps each call's DB work atomic
+// relative to the next.
 let buffer = '';
+let chain = Promise.resolve();
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   buffer += chunk;
@@ -325,7 +331,7 @@ process.stdin.on('data', (chunk) => {
     if (!line) continue;
     let msg;
     try { msg = JSON.parse(line); } catch { continue; }
-    handle(msg).catch((e) => log(`handler crashed: ${e.message}`));
+    chain = chain.then(() => handle(msg)).catch((e) => log(`handler crashed: ${e.message}`));
   }
 });
 process.stdin.on('end', () => process.exit(0));

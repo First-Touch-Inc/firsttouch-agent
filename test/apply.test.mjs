@@ -478,3 +478,58 @@ test('apply attempts increment and can be read for a retry cap', () => {
   assert.equal(ledger.bumpApplyAttempts(id), 2);
   assert.equal(ledger.getWorkItem(id).apply_attempts, 2);
 });
+
+// --- N1: verifyAndComplete FAILS CLOSED on unverifiable copy/owner -----------
+
+test('a null owner from readTask refuses completion (fail closed)', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  platform.state.tasks.t1 = { status: 'open', copy: 'original draft', owner_provider_id: null };
+  const id = stageOutreach(ledger);
+  approve(ledger, id);
+  const r = await applyWorkItem({ ledger, cfg: CFG, workItemId: id, platform, crm: fakeCrm(), now: NOW });
+  assert.equal(r.outcome, 'conflict');
+  assert.match(r.detail, /unverifiable|wrong person/);
+  assert.ok(!platform.state.calls.some(([n]) => n === 'completeTask'), 'must not send when owner is unverifiable');
+});
+
+test('a null copy from readTask refuses completion (fail closed)', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  platform.state.tasks.t1 = { status: 'open', copy: null, owner_provider_id: 'usr_ada' };
+  const id = stageOutreach(ledger);
+  approve(ledger, id);
+  const r = await applyWorkItem({ ledger, cfg: CFG, workItemId: id, platform, crm: fakeCrm(), now: NOW });
+  assert.equal(r.outcome, 'conflict');
+  assert.match(r.detail, /unverifiable|approved/);
+  assert.ok(!platform.state.calls.some(([n]) => n === 'completeTask'));
+});
+
+test('the explicit copy_unverifiable opt-in allows completion on a null copy', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  platform.state.tasks.t1 = { status: 'open', copy: null, copy_unverifiable: true, owner_provider_id: 'usr_ada' };
+  const id = stageOutreach(ledger);
+  approve(ledger, id);
+  const r = await applyWorkItem({ ledger, cfg: CFG, workItemId: id, platform, crm: fakeCrm(), now: NOW });
+  assert.equal(r.outcome, 'applied', 'the conscious create-time-trust opt-in permits the send');
+});
+
+// --- N2: campaign copy conflict cancels the member's tasks -------------------
+
+test('a campaign member conflict cancels its FT tasks, leaving none actionable', async () => {
+  const ledger = openLedger(':memory:');
+  const platform = fakePlatform();
+  const members = [{ subject: { email: 'a@x.com' }, subject_id: ledger.resolveSubject('person', { normalized_email: 'a@x.com' }) }];
+  const id = ledger.createWorkItem({
+    teammate: 'agent', motion: 'chat', kind: 'outreach',
+    payload: { campaign: { name: 'c', why: 'w', steps: [{ channel: 'email', copy: 'approved' }], admitted: members, excluded: [] } },
+    ownerProviderId: 'usr_ada', expiresAt: FUTURE,
+  });
+  approve(ledger, id);
+  platform.state.nextTaskIds = ['cx'];
+  platform.state.tasks.cx = { status: 'open', copy: 'WRONG', owner_provider_id: 'usr_ada' };
+  await applyCampaignTick({ ledger, cfg: CFG, item: ledger.getWorkItem(id), platform, now: NOW });
+  assert.ok(platform.state.calls.some(([n, ids]) => n === 'cancelAction' && ids.includes('cx')),
+    'the conflicted member task must be cancelled, not left open in the FT queue');
+});

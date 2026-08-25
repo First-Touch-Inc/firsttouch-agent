@@ -82,11 +82,32 @@ export async function connect({ url, token, timeoutMs = 20_000 }) {
     return json.result;
   }
 
+  // A JSON-RPC notification: no id, no response expected. Best-effort — a
+  // server that does not need it will simply ignore the POST.
+  async function notify(method, params) {
+    try {
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch { /* notifications are best-effort */ }
+  }
+
   await rpc('initialize', {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
     clientInfo: { name: 'firsttouch-agent', version: '0.1.0' },
   });
+  // The lifecycle spec requires `notifications/initialized` after initialize
+  // and before tools/call; a strict server refuses calls without it.
+  await notify('notifications/initialized', {});
 
   return {
     /**

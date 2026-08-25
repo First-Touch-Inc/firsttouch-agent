@@ -538,6 +538,16 @@ export class Ledger {
     return r.changes > 0;
   }
 
+  /** Boot recovery: an intent claimed for application (pending → applying)
+   *  whose process died before the apply ran is picked up by nothing —
+   *  dueIntents sees only 'pending'. Reset in-flight intents to pending so the
+   *  next tick re-drives them; apply is idempotent, so this is safe. Returns
+   *  how many were recovered. */
+  recoverInflightIntents() {
+    const r = this.db.prepare("UPDATE intents SET status = 'pending' WHERE status = 'applying'").run();
+    return r.changes;
+  }
+
   dueIntents(nowIso = new Date().toISOString()) {
     return this.db.prepare(
       "SELECT * FROM intents WHERE status = 'pending' AND apply_after <= ? ORDER BY apply_after")

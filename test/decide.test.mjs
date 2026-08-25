@@ -222,3 +222,22 @@ test('a malformed button value refuses rather than guesses', async () => {
   });
   assert.match(calls.ephemeral.at(-1), /refusing to guess/);
 });
+
+// --- N4: crash after claimIntent must not eat the approval -------------------
+
+test('an intent claimed then abandoned is recovered to pending on boot', () => {
+  const ledger = openLedger(':memory:');
+  const id = ledger.createWorkItem({
+    teammate: 'agent', motion: 'outbound', kind: 'outreach',
+    payload: { subject: {}, steps: [{ channel: 'email', copy: 'x' }] },
+    ownerProviderId: 'usr_ada', expiresAt: FUTURE,
+  });
+  const d = ledger.recordDecision({ workItemId: id, actorSlackId: 'U0ADA', decision: 'approve' });
+  const intent = ledger.createIntent({ workItemId: id, decisionId: d.id });
+  // Tick claims it, then the process dies before apply.
+  assert.equal(ledger.claimIntent(intent.id), true);
+  assert.equal(ledger.dueIntents(FUTURE).length, 0, 'a claimed (applying) intent is not due');
+  // Boot recovery.
+  assert.equal(ledger.recoverInflightIntents(), 1);
+  assert.equal(ledger.dueIntents(FUTURE).length, 1, 'after recovery it is due again — approval not lost');
+});

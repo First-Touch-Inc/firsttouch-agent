@@ -39,11 +39,19 @@ const iso = (d) => d.toISOString();
 
 /**
  * Verify a created action holds the approved copy and the right sender, THEN
- * complete it. Shared by single-contact outreach and campaign drip so both
- * enforce the same invariant: never complete a task whose copy or owner does
- * not match, because completing an approval-gated task IS the send. Returns
- * { ok } or { conflict: detail } — the caller decides what to do with a
- * conflict (single: abort; campaign: skip this member).
+ * complete it. Completing an approval-gated task IS the send, so this FAILS
+ * CLOSED: if the owner cannot be confirmed to match, or the copy cannot be
+ * confirmed to match, it refuses rather than completing. A null/undefined
+ * owner or copy is "could not verify", which is a conflict — never a skip.
+ *
+ * Consequence worth stating plainly: until the platform's preview_task field
+ * mapping is confirmed against a real task (the very first supervised send in
+ * the shadow run), sends CONFLICT instead of firing. That is the safe
+ * direction — a wrong-sender or lost-edit send is irreversible; a conflict is
+ * a card that says "couldn't verify, look at this". The shadow run surfaces
+ * the real field names immediately, they get mapped in providers.readTask,
+ * and sends flow. `copy_unverifiable` on the returned task is the escape the
+ * operator can consciously enable once round-trip is proven (not the default).
  */
 async function verifyAndComplete({ platform, taskIds, steps, ownerProviderId }) {
   for (let i = 0; i < taskIds.length; i++) {
@@ -52,12 +60,22 @@ async function verifyAndComplete({ platform, taskIds, steps, ownerProviderId }) 
     if (task.status === 'cancelled') {
       return { conflict: `task ${taskIds[i]} was cancelled on the platform — not completing` };
     }
-    if (task.owner_provider_id && task.owner_provider_id !== ownerProviderId) {
-      return { conflict: `task ${taskIds[i]} landed on owner ${task.owner_provider_id}, expected ${ownerProviderId} — sending as the wrong person is irreversible` };
+    // OWNER: must be confirmed equal. null (couldn't read) or mismatch = refuse.
+    if (task.owner_provider_id !== ownerProviderId) {
+      return { conflict: `task ${taskIds[i]} owner is ${task.owner_provider_id ?? 'unverifiable'}, expected ${ownerProviderId} — sending as the wrong person is irreversible, so completion is refused` };
     }
+    // COPY: must be confirmed equal. Unless the provider explicitly reports the
+    // copy as unverifiable AND the operator opted into trusting create-time
+    // copy, a null/undefined or mismatched copy refuses.
     const expected = steps[i]?.copy;
-    if (expected !== undefined && task.copy !== undefined && task.copy !== null && task.copy !== expected) {
-      return { conflict: `task ${taskIds[i]} does not hold the approved copy — completion refused so the human's edit cannot be silently lost` };
+    if (expected !== undefined) {
+      if (task.copy_unverifiable === true) {
+        // provider says this platform does not expose copy for readback; the
+        // create-time guarantee stands (we sent the approved copy). Allowed
+        // only because the provider made an explicit, code-level assertion.
+      } else if (task.copy !== expected) {
+        return { conflict: `task ${taskIds[i]} copy is ${task.copy == null ? 'unverifiable' : 'not the approved text'} — completion refused so the human's edit cannot be silently lost` };
+      }
     }
   }
   // All verified: complete every non-terminal task.
@@ -335,6 +353,12 @@ export async function applyCampaignTick({ ledger, cfg, item, platform, now = () 
       platform, taskIds: created.task_ids, steps, ownerProviderId: item.owner_provider_id,
     });
     if (v.conflict) {
+      // Cancel the member's tasks so they cannot be completed from the
+      // FirstTouch queue later — an open task is a second send path that never
+      // sees Slack ownership, the suppression re-screen, or caps.
+      if (typeof platform.cancelAction === 'function') {
+        await platform.cancelAction(created.task_ids).catch(() => {});
+      }
       ledger.releaseTouch(reserve.touchId);
       ledger.recordApplyResult(memberKey, `conflict:${v.conflict}`);
       skipped++;

@@ -30,12 +30,26 @@ export async function firsttouchProvider({
   connectImpl = connect,
 } = {}) {
   if (!token) throw new Error('FT_MCP_TOKEN is not set — the FirstTouch adapter cannot start.');
-  const client = await connectImpl({ url: FT_URL(), token });
+  let client = await connectImpl({ url: FT_URL(), token });
 
+  // One long-lived session is reused for the host's lifetime. A server that
+  // idle-kills the session, or a transient network drop, would otherwise fail
+  // every call forever. On a transport error, reconnect ONCE and retry — but
+  // never on a tool-level isError (that is a real refusal, not a dead session).
   const call = async (name, args) => {
-    const { text, isError } = await client.callTool(name, args);
-    if (isError) throw new Error(`${name}: ${text.slice(0, 400)}`);
-    return parseJsonText(text, name);
+    try {
+      const { text, isError } = await client.callTool(name, args);
+      if (isError) throw new Error(`${name}: ${text.slice(0, 400)}`);
+      return parseJsonText(text, name);
+    } catch (e) {
+      if (/\b(session|connect|reach|respond|network|socket|ECONN|timed out|initialize)\b/i.test(e.message)) {
+        client = await connectImpl({ url: FT_URL(), token });
+        const { text, isError } = await client.callTool(name, args);
+        if (isError) throw new Error(`${name}: ${text.slice(0, 400)}`);
+        return parseJsonText(text, name);
+      }
+      throw e;
+    }
   };
 
   // In a dry run NOTHING that changes the outside world may happen — not even
@@ -153,14 +167,18 @@ export async function firsttouchProvider({
       const task = res?.task ?? res;
       const status = String(task?.status ?? '').toLowerCase();
       // Copy lives in task.properties (PropertyValueDto[]); pull the message/
-      // body property if present. A null copy is tolerated by verifyAndComplete
-      // (we created the task WITH the approved copy, so it holds it by
-      // construction; the readback is belt, not the only brace).
+      // body property if present. verifyAndComplete FAILS CLOSED on a copy it
+      // cannot confirm, so if we cannot locate it we say so explicitly. An
+      // operator who has confirmed via a shadow run that the platform stores
+      // exactly what we send may set OUTREACH_TRUST_CREATE_COPY=1 to rely on
+      // the create-time guarantee instead — a conscious opt-in, never default.
       const props = Array.isArray(task?.properties) ? task.properties : [];
-      const bodyProp = props.find((p) => /message|body|content/i.test(p?.name ?? p?.key ?? ''));
+      const bodyProp = props.find((p) => /message|body|content|copy|text/i.test(p?.name ?? p?.key ?? ''));
+      const copy = bodyProp?.value ?? null;
       return {
         status: status === 'done' ? 'completed' : status === 'canceled' || status === 'cancelled' ? 'cancelled' : 'open',
-        copy: bodyProp?.value ?? null,
+        copy,
+        copy_unverifiable: copy == null && process.env.OUTREACH_TRUST_CREATE_COPY === '1',
         owner_provider_id: task?.assignedUserId ?? task?.ownerId ?? null,
         can_execute: res?.readiness?.canExecute ?? task?.readiness?.canExecute ?? true,
       };
@@ -357,7 +375,7 @@ export function externalToolProviders(cfg, { connectImpl = connect, env = proces
 }
 
 /** The HubSpot adapter: reads for the tool surface, compare-and-set for apply. */
-export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {}) {
+export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN, dryRun = process.env.DRY_RUN === '1' } = {}) {
   if (!token) throw new Error('HUBSPOT_ACCESS_TOKEN is not set — the CRM adapter cannot start.');
   const base = process.env.HUBSPOT_API_BASE_URL || 'https://api.hubapi.com';
 
@@ -399,7 +417,13 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
     // (recognise customers) and suppression_signal (opt-out / DNC in the CRM),
     // so the customer's own CRM stays the source of truth and this is just the
     // portable query into it.
-    async listBySignal({ signal, limit = 2000 }) {
+    // Paginate the FULL result set by default — a truncated customer or
+    // suppression list means the truncated remainder gets prospected, which is
+    // exactly the failure this query exists to prevent. `maxPages` is a runaway
+    // guard (100 pages × 100 = 10k), and hitting it THROWS rather than silently
+    // returning a partial list, so the caller (the seed) treats it as a CRM
+    // error and the motion skips instead of prospecting the un-fetched tail.
+    async listBySignal({ signal, maxPages = 500 }) {
       const filters = (signal ?? [])
         .filter((s) => s?.property)
         .map((s) => ({
@@ -410,7 +434,11 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
       if (filters.length === 0) return [];
       const out = [];
       let after;
+      let pages = 0;
       do {
+        if (pages++ >= maxPages) {
+          throw new Error(`signal query exceeded ${maxPages} pages (${out.length}+ rows) — refusing to return a partial list`);
+        }
         const body = {
           limit: 100, after,
           filterGroups: [{ filters }],
@@ -424,14 +452,14 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
           });
         }
         after = res?.paging?.next?.after;
-      } while (after && out.length < limit);
+      } while (after);
       return out;
     },
-    listCustomers({ customer_signal, limit = 2000 }) {
-      return this.listBySignal({ signal: customer_signal, limit });
+    listCustomers({ customer_signal }) {
+      return this.listBySignal({ signal: customer_signal });
     },
-    listSuppressed({ suppression_signal, limit = 5000 }) {
-      return this.listBySignal({ signal: suppression_signal, limit });
+    listSuppressed({ suppression_signal }) {
+      return this.listBySignal({ signal: suppression_signal });
     },
 
     // --- apply path (`crm` interface): compare-and-set halves ---
@@ -440,8 +468,16 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
         `/crm/v3/objects/${objectPath(object_type)}/${encodeURIComponent(object_id)}?properties=${encodeURIComponent(field)}`);
       return res?.properties?.[field] ?? null;
     },
-    updateProperty: ({ object_type, object_id, field, value }) => api('PATCH',
-      `/crm/v3/objects/${objectPath(object_type)}/${encodeURIComponent(object_id)}`,
-      { properties: { [field]: value } }),
+    updateProperty: ({ object_type, object_id, field, value }) => {
+      // A CRM write is a real change to the customer's data — a dry run must
+      // not make one, even when an approved card fires. The apply path surfaces
+      // the thrown error as a conflict.
+      if (dryRun) {
+        return Promise.reject(new Error(`DRY_RUN is on — refusing to write ${field} on ${object_type} ${object_id}.`));
+      }
+      return api('PATCH',
+        `/crm/v3/objects/${objectPath(object_type)}/${encodeURIComponent(object_id)}`,
+        { properties: { [field]: value } });
+    },
   };
 }
