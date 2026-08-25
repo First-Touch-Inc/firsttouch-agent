@@ -240,6 +240,16 @@ export class Ledger {
       for (const other of rows.slice(1)) {
         this.db.prepare('UPDATE subject_aliases SET subject_id = ? WHERE subject_id = ?')
           .run(subjectId, other.subject_id);
+        // Repoint everything else keyed by the disappearing subject, or a merge
+        // silently erases a subject-scoped SUPPRESSION and the person becomes
+        // contactable again. Claims and touches move too, for the same reason.
+        this.db.prepare('UPDATE suppressions SET value = ? WHERE scope = ? AND value = ?')
+          .run(subjectId, 'subject', other.subject_id);
+        this.db.prepare('UPDATE touches SET subject_id = ? WHERE subject_id = ?')
+          .run(subjectId, other.subject_id);
+        this.db.prepare('UPDATE work_items SET subject_id = ? WHERE subject_id = ?')
+          .run(subjectId, other.subject_id);
+        this.db.prepare('DELETE FROM claims WHERE subject_id = ?').run(other.subject_id);
       }
     }
 
@@ -321,7 +331,24 @@ export class Ledger {
   /** Reserve a touch inside the caps, or refuse with the cap that was hit.
    *  Reservation, not commitment: confirmed at apply, released on denial or
    *  TTL expiry, so a denied card gives its slot back. */
-  reserveTouch({ subjectId, teammate, channel, domain, caps, ttlMinutes = 360 },
+  reserveTouch(args, nowIso = new Date().toISOString()) {
+    // The count-check and the insert must be ONE atomic step, or two concurrent
+    // reservations (host apply + a spawned tool server, separate processes on
+    // the same DB file) can both pass the same cap and both insert. BEGIN
+    // IMMEDIATE takes the write lock for the whole check+insert; busy_timeout
+    // makes the loser wait rather than error.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this._reserveTouchLocked(args, nowIso);
+      this.db.exec('COMMIT');
+      return result;
+    } catch (e) {
+      try { this.db.exec('ROLLBACK'); } catch {}
+      throw e;
+    }
+  }
+
+  _reserveTouchLocked({ subjectId, teammate, channel, domain, caps, ttlMinutes = 360 },
                nowIso = new Date().toISOString()) {
     this.releaseExpiredTouches(nowIso);
     const now = new Date(nowIso);

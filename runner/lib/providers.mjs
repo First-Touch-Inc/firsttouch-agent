@@ -282,6 +282,38 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
       properties: ['dealname', 'dealstage', 'closedate', 'amount', 'hubspot_owner_id', 'hs_lastmodifieddate'],
     }),
 
+    // Every contact matching the tenant's customer_signal — the input to the
+    // suppression seed, so the agent never prospects a paying customer. Uses
+    // the SAME signal config the validator requires, as HubSpot filters.
+    async listCustomers({ customer_signal, limit = 500 }) {
+      const filters = (customer_signal ?? [])
+        .filter((s) => s?.property)
+        .map((s) => ({
+          propertyName: s.property,
+          operator: s.equals !== undefined ? 'EQ' : (s.operator || 'HAS_PROPERTY').toUpperCase(),
+          ...(s.equals !== undefined ? { value: s.equals } : s.value !== undefined ? { value: s.value } : {}),
+        }));
+      if (filters.length === 0) return [];
+      const out = [];
+      let after;
+      do {
+        const body = {
+          limit: 100, after,
+          filterGroups: [{ filters }],
+          properties: ['email', 'company', 'website', 'hs_email_domain'],
+        };
+        const res = await api('POST', '/crm/v3/objects/contacts/search', body);
+        for (const r of res?.results ?? []) {
+          out.push({
+            email: r.properties?.email ?? null,
+            company_domain: r.properties?.hs_email_domain ?? r.properties?.website ?? null,
+          });
+        }
+        after = res?.paging?.next?.after;
+      } while (after && out.length < limit);
+      return out;
+    },
+
     // --- apply path (`crm` interface): compare-and-set halves ---
     async readProperty({ object_type, object_id, field }) {
       const res = await api('GET',

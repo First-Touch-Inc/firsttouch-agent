@@ -37,6 +37,7 @@ import { buildCard, digestBlocks } from './lib/cards.mjs';
 import { dueSchedules } from './lib/schedule.mjs';
 import { firsttouchProvider, hubspotProvider, loadExtraAdapters } from './lib/providers.mjs';
 import { distillLessons } from './lib/distill.mjs';
+import { seedSuppressions } from './lib/suppress-seed.mjs';
 
 const log = (...a) => console.log(`[host ${new Date().toISOString()}]`, ...a);
 
@@ -336,8 +337,37 @@ function playContent(playName) {
   return `(play "${playName}" not found — sweep conservatively and report that the play file is missing)`;
 }
 
+// Refresh the suppressions table from DNC + config + CRM customers. Called at
+// boot and before each motion so a customer added yesterday is suppressed
+// today. A CRM error is reported, never treated as "no customers".
+async function refreshSuppressions(reason) {
+  const summary = await seedSuppressions({
+    ledger, cfg,
+    crmCustomers: crm
+      ? () => crm.listCustomers({ customer_signal: cfg.providers?.crm?.customer_signal })
+      : null,
+    now: () => new Date(),
+  });
+  if (summary.crm_error) {
+    await say(cfg.approval.digest_channel,
+      `⚠️ could not refresh customer suppression from the CRM (${summary.crm_error}) — ` +
+      `keeping the previous list; a run will still not prospect anyone already suppressed.`);
+  }
+  log(`suppressions seeded (${reason}): ${JSON.stringify(summary)}`);
+  return summary;
+}
+
 async function runMotion(motion, { dry = false } = {}) {
   log(`motion ${motion.id} starting${dry ? ' (dry)' : ''}`);
+  // Seed BEFORE the sweep so today's customers/DNC are in the table the
+  // agent's tools check. If this throws, the motion does not run — better a
+  // skipped day than prospecting the customer base.
+  try {
+    await refreshSuppressions(`before ${motion.id}`);
+  } catch (e) {
+    await say(cfg.approval.digest_channel, `⚠️ ${motion.id} skipped: suppression seed failed (${e.message}).`);
+    return;
+  }
   const prompt = [
     commonContext(),
     `\n--- The motion you are running: ${motion.id} (${motion.kind}) ---`,
@@ -602,6 +632,10 @@ async function socketLoop() {
 }
 
 log(`host up — client=${JSON.stringify(cfg.client.name)} motions=${cfg.__meta.enabledMotions.map((m) => m.id).join(',') || 'none'}`);
+// Seed suppressions once at boot so chat-driven work is protected immediately,
+// not only after the first scheduled motion. Non-fatal: a boot-time CRM
+// hiccup must not stop the host from coming up to serve approvals.
+refreshSuppressions('boot').catch((e) => log(`boot suppression seed failed: ${e.message}`));
 while (true) {
   try {
     await socketLoop();

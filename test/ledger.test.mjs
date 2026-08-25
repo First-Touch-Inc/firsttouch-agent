@@ -274,3 +274,36 @@ test('watermarks are per teammate per source', () => {
   assert.equal(L.getWatermark('outbound', 'signal_feed'), '2026-08-25T00:00:00Z');
   assert.equal(L.getWatermark('deal-desk', 'signal_feed'), null);
 });
+
+// --- merge safety: a subject merge must not erase a suppression --------------
+
+test('merging two subjects preserves a subject-scoped suppression', () => {
+  const L = mem();
+  const byEmail = L.resolveSubject('person', { normalized_email: 'sam@acme.com' });
+  L.suppress('subject', byEmail, 'manually excluded', 'operator', null);
+  const byCrm = L.resolveSubject('person', { crm_contact_id: '77' });
+  assert.notEqual(byEmail, byCrm);
+  // A later sweep proves they are the same person → merge.
+  const merged = L.resolveSubject('person', { normalized_email: 'sam@acme.com', crm_contact_id: '77' });
+  // The surviving subject must still be suppressed.
+  const hit = L.suppressionFor({ subjectId: merged });
+  assert.ok(hit, 'the subject suppression must survive the merge');
+  assert.equal(hit.reason, 'manually excluded');
+});
+
+// --- atomic caps: reserveTouch is a single locked step -----------------------
+
+test('reserveTouch commits its check-and-insert atomically', () => {
+  // A direct behavioural check: at cap N, exactly N reservations succeed and
+  // the next is refused — the transaction wrapper must not change that, and it
+  // must leave no dangling BEGIN (a second call still works).
+  const L = mem();
+  const s = L.resolveSubject('person', { normalized_email: 'a@x.com' });
+  const caps = { per_contact_per_quarter: 2 };
+  assert.ok(L.reserveTouch({ subjectId: s, teammate: 'agent', channel: 'email', caps }).ok);
+  assert.ok(L.reserveTouch({ subjectId: s, teammate: 'agent', channel: 'email', caps }).ok);
+  assert.equal(L.reserveTouch({ subjectId: s, teammate: 'agent', channel: 'email', caps }).ok, false);
+  // The DB is not left in a transaction — an unrelated write still works.
+  const s2 = L.resolveSubject('person', { normalized_email: 'b@y.com' });
+  assert.ok(L.reserveTouch({ subjectId: s2, teammate: 'agent', channel: 'email', caps }).ok);
+});
