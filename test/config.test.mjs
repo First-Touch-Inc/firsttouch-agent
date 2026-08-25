@@ -4,6 +4,9 @@
 // misconfigured fork and real outreach sent to the wrong people from the wrong
 // person's account. Every case below is a mistake someone will actually make.
 //
+// Onboarding writes config through this same validator, so every rejection
+// here is also a thing the onboarding conversation cannot produce.
+//
 //   npm test
 
 import { test } from 'node:test';
@@ -11,34 +14,39 @@ import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { dump, load } from 'js-yaml';
-import { loadConfig, ConfigError, ROOT } from '../runner/lib/config.mjs';
+import { loadConfig, validateConfig, ConfigError, ROOT, MOTION_KINDS } from '../runner/lib/config.mjs';
 
-const EXAMPLE = join(ROOT, 'config', 'tenant.example.yaml');
+const EXAMPLE = join(ROOT, 'config', 'agent.example.yaml');
 
 // A minimal config that SHOULD pass, built from the shipped example so the two
 // can never drift apart silently.
 function validConfig() {
   const cfg = load(readFileSync(EXAMPLE, 'utf8'));
-  cfg.providers.crm.customer_signal = [{ property: 'active_seats', operator: 'gte', value: 1 }];
+  cfg.client.name = 'Northwind Analytics';
+  cfg.providers.crm.customer_signal = [{ property: 'active_seats', equals: 'yes' }];
+  const outbound = cfg.motions.find((m) => m.kind === 'outbound');
+  for (const s of outbound.sources) if (s.type === 'crm.list') s.list_id = 'list_123';
+  cfg.approval.channel = 'C01234ABCDE';
   cfg.approval_routing.owners = [{
     id: 'primary',
     name: 'Ada Lovelace',
     provider_user_id: 'usr_test_123',
-    slack_channel: '#approvals',
+    slack_user_id: 'U01234ABCDE',
     match: 'default',
   }];
+  cfg.chat.allowed_users = ['U01234ABCDE'];
   return cfg;
 }
 
-// Write a config into config/ under a throwaway tenant name and load it.
+// Write a config into config/ under a throwaway name and load it.
 function loadWith(mutate) {
   const cfg = validConfig();
   if (mutate) mutate(cfg);
-  const tenant = `__test_${Math.random().toString(36).slice(2, 10)}`;
-  const path = join(ROOT, 'config', `${tenant}.yaml`);
+  const name = `__test_${Math.random().toString(36).slice(2, 10)}`;
+  const path = join(ROOT, 'config', `${name}.yaml`);
   writeFileSync(path, dump(cfg));
   try {
-    return loadConfig(tenant);
+    return loadConfig(name);
   } finally {
     rmSync(path, { force: true });
   }
@@ -54,27 +62,32 @@ function problemsFrom(mutate) {
   }
 }
 
-test('the shipped example is valid YAML and parses', () => {
+test('the shipped example is valid YAML and has all four motion kinds', () => {
   const cfg = load(readFileSync(EXAMPLE, 'utf8'));
   assert.equal(typeof cfg, 'object');
-  assert.ok(Array.isArray(cfg.buckets));
+  assert.deepEqual(
+    cfg.motions.map((m) => m.kind).sort(),
+    [...MOTION_KINDS].sort(),
+    'the example must demonstrate every motion kind',
+  );
 });
 
-test('a fully specified config loads', () => {
+test('a fully specified config loads, with enabled motions in __meta', () => {
   const cfg = loadWith();
   assert.equal(cfg.client.name, 'Northwind Analytics');
-  assert.equal(cfg.__meta.effectiveCap, cfg.caps.supervised_run_cap, 'supervised mode uses the supervised cap');
+  assert.equal(cfg.__meta.enabledMotions.length, 1, 'only outbound is enabled in the example');
+  assert.match(cfg.__meta.ledgerPath, /ledger\.db$/);
 });
 
 test('the UNEDITED example is rejected', () => {
   // If this ever passes, the placeholder checks have regressed and a fork
   // could run against placeholder ids.
   const cfg = load(readFileSync(EXAMPLE, 'utf8'));
-  const tenant = `__test_raw_${Math.random().toString(36).slice(2, 8)}`;
-  const path = join(ROOT, 'config', `${tenant}.yaml`);
+  const name = `__test_raw_${Math.random().toString(36).slice(2, 8)}`;
+  const path = join(ROOT, 'config', `${name}.yaml`);
   writeFileSync(path, dump(cfg));
   try {
-    assert.throws(() => loadConfig(tenant), ConfigError);
+    assert.throws(() => loadConfig(name), ConfigError);
   } finally {
     rmSync(path, { force: true });
   }
@@ -82,12 +95,21 @@ test('the UNEDITED example is rejected', () => {
 
 test('a missing config names the file and tells you how to make one', () => {
   try {
-    loadConfig('__definitely_not_a_tenant__');
+    loadConfig('__definitely_not_a_config__');
     assert.fail('should have thrown');
   } catch (e) {
     assert.ok(e instanceof ConfigError);
-    assert.match(e.message, /cp config\/tenant\.example\.yaml/);
+    assert.match(e.message, /cp config\/agent\.example\.yaml/);
   }
+});
+
+test('validateConfig is usable standalone for pre-write validation', () => {
+  // Onboarding's set_config validates a candidate BEFORE writing it.
+  const problems = validateConfig(validConfig());
+  assert.deepEqual(problems, []);
+  const bad = validConfig();
+  bad.run_mode = 'yolo';
+  assert.ok(validateConfig(bad).some((p) => /run_mode/.test(p)));
 });
 
 // --- ownership: the highest-consequence validation ---------------------------
@@ -119,10 +141,15 @@ test('duplicate owner ids are rejected', () => {
   assert.match(p, /Duplicate owner id/);
 });
 
+test('an owner slack_user_id that is not a Slack ID is rejected', () => {
+  const p = problemsFrom((c) => { c.approval_routing.owners[0].slack_user_id = '@ada'; });
+  assert.match(p, /not a Slack user ID/);
+});
+
 // --- suppression: prevents prospecting your own customers --------------------
 
 test('an unconfigured customer_signal is rejected', () => {
-  const p = problemsFrom((c) => { c.providers.crm.customer_signal = [{ property: '', operator: 'gte', value: 1 }]; });
+  const p = problemsFrom((c) => { c.providers.crm.customer_signal = [{ property: '' }]; });
   assert.match(p, /customer_signal/);
   assert.match(p, /no safe default/);
 });
@@ -132,37 +159,92 @@ test('an empty suppression list is rejected', () => {
   assert.match(p, /suppression/);
 });
 
-// --- buckets -----------------------------------------------------------------
+// --- motions -----------------------------------------------------------------
 
-test('an ENABLED bucket with a placeholder list_id is rejected', () => {
+test('an unknown motion kind is rejected', () => {
+  const p = problemsFrom((c) => { c.motions[0].kind = 'growth_hacking'; });
+  assert.match(p, /kind must be one of/);
+});
+
+test('no enabled motion is rejected', () => {
+  const p = problemsFrom((c) => { for (const m of c.motions) m.enabled = false; });
+  assert.match(p, /No motion is enabled/);
+});
+
+test('duplicate motion ids are rejected', () => {
+  const p = problemsFrom((c) => { c.motions.push({ ...c.motions[0] }); });
+  assert.match(p, /Duplicate motion id/);
+});
+
+test('an ENABLED motion with a placeholder list_id is rejected', () => {
   const p = problemsFrom((c) => {
-    const b = c.buckets.find((x) => x.id === 'target-accounts');
-    b.enabled = true; // its list_id is still <YOUR_TARGET_ACCOUNT_LIST_ID>
+    const outbound = c.motions.find((m) => m.kind === 'outbound');
+    outbound.sources.push({ type: 'crm.list', list_id: '<still a placeholder>' });
   });
-  assert.match(p, /still a placeholder/);
+  assert.match(p, /placeholder list_id/);
 });
 
-test('a DISABLED bucket with a placeholder list_id is fine', () => {
-  // Only what will actually run gets validated — otherwise the shipped example
-  // could never be a starting point.
+test('a DISABLED motion with placeholders is fine — only what runs is validated', () => {
+  // Otherwise the shipped example could never be a starting point.
   const cfg = loadWith();
-  assert.ok(cfg.buckets.some((b) => !b.enabled && String(b.source?.list_id || '').startsWith('<')));
+  const disabled = cfg.motions.filter((m) => !m.enabled);
+  assert.ok(disabled.length >= 3, 'the example ships three disabled motions');
 });
 
-test('no enabled bucket is rejected', () => {
-  const p = problemsFrom((c) => { for (const b of c.buckets) b.enabled = false; });
-  assert.match(p, /No bucket is enabled/);
+test('a schedule that is not a cron line is rejected', () => {
+  const p = problemsFrom((c) => { c.motions[0].schedule = '8am weekdays'; });
+  assert.match(p, /five-field cron/);
 });
 
-test('duplicate bucket ids are rejected', () => {
-  const p = problemsFrom((c) => { c.buckets.push({ ...c.buckets[0] }); });
-  assert.match(p, /Duplicate bucket id/);
+test('deal_followup requires an explicit CRM change allowlist', () => {
+  const p = problemsFrom((c) => {
+    const m = c.motions.find((x) => x.kind === 'deal_followup');
+    m.enabled = true;
+    m.pipeline_id = 'pipe_1';
+    m.crm_fields_may_change = [];
+  });
+  assert.match(p, /crm_fields_may_change/);
 });
 
-// --- caps and mode -----------------------------------------------------------
+test('cs_postclose requires a dashboard identity string, and says why', () => {
+  const p = problemsFrom((c) => {
+    const m = c.motions.find((x) => x.kind === 'cs_postclose');
+    m.enabled = true;
+    m.dashboard = { base_url: 'https://cs.example.com/api' }; // no identity
+  });
+  assert.match(p, /dashboard\.identity/);
+  assert.match(p, /SOMETHING answered/, 'the message must carry the production lesson');
+});
 
-test('a floor above the ceiling is rejected', () => {
-  const p = problemsFrom((c) => { c.caps.min_per_day = 50; c.caps.max_per_day = 10; });
+// --- approval ----------------------------------------------------------------
+
+test('a missing approval block is rejected', () => {
+  const p = problemsFrom((c) => { delete c.approval; });
+  assert.match(p, /approval is required/);
+});
+
+test('approval.channel must be a channel ID, not a #name', () => {
+  const p = problemsFrom((c) => { c.approval.channel = '#approvals'; });
+  assert.match(p, /Slack channel ID/);
+});
+
+test('an undo window outside 10–300 seconds is rejected', () => {
+  const p = problemsFrom((c) => { c.approval.undo_seconds = 0; });
+  assert.match(p, /undo_seconds/);
+  const p2 = problemsFrom((c) => { c.approval.undo_seconds = 3600; });
+  assert.match(p2, /undo_seconds/);
+});
+
+// --- limits: enforced, so they must be real ----------------------------------
+
+test('a blank limit is invalid, not unlimited', () => {
+  const p = problemsFrom((c) => { delete c.limits.per_day; });
+  assert.match(p, /limits\.per_day/);
+  assert.match(p, /not "unlimited"/);
+});
+
+test('per_day above per_week is rejected', () => {
+  const p = problemsFrom((c) => { c.limits.per_day = 500; c.limits.per_week = 100; });
   assert.match(p, /cannot exceed/);
 });
 
@@ -171,9 +253,16 @@ test('an unknown run_mode is rejected', () => {
   assert.match(p, /run_mode/);
 });
 
-test('daily mode uses the real ceiling, not the supervised cap', () => {
-  const cfg = loadWith((c) => { c.run_mode = 'daily'; });
-  assert.equal(cfg.__meta.effectiveCap, cfg.caps.max_per_day);
+// --- flows: the allowlist is the permission ----------------------------------
+
+test('an empty flows list is valid and means "no flows"', () => {
+  const cfg = loadWith((c) => { c.flows = []; });
+  assert.deepEqual(cfg.flows, []);
+});
+
+test('a flow without a real id is rejected', () => {
+  const p = problemsFrom((c) => { c.flows = [{ id: '<flow id>', name: 'Welcome' }]; });
+  assert.match(p, /allowlist is the permission/);
 });
 
 // --- providers ---------------------------------------------------------------
@@ -235,17 +324,6 @@ test('extra_plays directory loads .md plays and skips its README', () => {
   }
 });
 
-test('extra_plays pointing at a single file loads that file', () => {
-  const f = join(ROOT, 'config', `__test_play_${Math.random().toString(36).slice(2, 8)}.md`);
-  writeFileSync(f, '---\nid: solo\n---\n');
-  try {
-    const cfg = loadWith((c) => { c.extra_plays = `config/${basename(f)}`; });
-    assert.equal(cfg.__meta.plays.custom.length, 1);
-  } finally {
-    rmSync(f, { force: true });
-  }
-});
-
 // --- chat --------------------------------------------------------------------
 // The dangerous case is an enabled chat agent with an empty allowlist: it would
 // answer whoever finds the channel. That must be an error, not a default.
@@ -273,31 +351,18 @@ test('chat rejects #channel-name where a channel ID is required', () => {
   assert.match(p, /not a Slack channel ID/);
 });
 
-test('a correctly configured chat block passes', () => {
-  const cfg = loadWith((c) => {
-    c.chat = { enabled: true, allowed_users: ['U01234ABCDE'], allowed_channels: ['C01234ABCDE'] };
-  });
-  assert.equal(cfg.chat.allowed_users.length, 1);
-});
+// --- state: one database, not files ------------------------------------------
 
-// --- the feedback loop -------------------------------------------------------
-// The orchestrator reads and writes state.lessons on every run. The key was
-// referenced in five places in the skill and defined in none, so the learning
-// silently never happened. These stop that returning.
-
-test('state.lessons is required — it is the feedback memory', () => {
-  const p = problemsFrom((c) => { delete c.state.lessons; });
-  assert.match(p, /state\.lessons is required/);
-  assert.match(p, /learn from feedback/);
-});
-
-test('state.ledger is required — it is what prevents contacting someone twice', () => {
+test('state.ledger is required', () => {
   const p = problemsFrom((c) => { delete c.state.ledger; });
   assert.match(p, /state\.ledger is required/);
 });
 
-test('lessons resolves to a real path under the state directory', () => {
-  const cfg = loadWith();
-  assert.ok(cfg.__meta.lessonsPath, 'the loader must resolve a lessons path');
-  assert.match(cfg.__meta.lessonsPath, /lessons\.md$/);
+test('the old state.lessons file key is rejected with a migration message', () => {
+  // Lessons live in the ledger, written only by the host. A config carrying
+  // the old key is from the previous schema and must fail loudly, not have
+  // half its learning silently ignored.
+  const p = problemsFrom((c) => { c.state.lessons = 'state/lessons.md'; });
+  assert.match(p, /no longer a file/);
+  assert.match(p, /Remove the state\.lessons key/);
 });

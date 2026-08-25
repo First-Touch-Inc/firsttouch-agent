@@ -9,6 +9,10 @@
 // This is the lesson from the system this repo was extracted from: every
 // `|| '<some literal>'` fallback in that codebase was a place where a
 // misconfigured run silently did the wrong thing instead of stopping.
+//
+// Onboarding writes config through the exact same validator. If a value would
+// be rejected here when hand-written, the onboarding conversation cannot
+// produce it either.
 
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
@@ -29,23 +33,30 @@ const PLACEHOLDER = /^<.*>$/;
 const isBlank = (v) => v === undefined || v === null || v === '' ||
   (typeof v === 'string' && (PLACEHOLDER.test(v.trim()) || v.trim() === ''));
 
-export function configPath(tenant = process.env.TENANT || 'tenant') {
-  return join(ROOT, 'config', `${tenant}.yaml`);
+export const MOTION_KINDS = ['outbound', 'inbound', 'deal_followup', 'cs_postclose'];
+
+// A five-field cron line. This is deliberately shallow — it catches "8am" and
+// "" and a pasted timezone, not every invalid cron. The scheduler validates
+// fully when it parses; this stops the obviously wrong thing at load time.
+const CRON_SHAPE = /^\S+ \S+ \S+ \S+ \S+$/;
+
+export function configPath(name = process.env.AGENT_CONFIG || 'agent') {
+  return join(ROOT, 'config', `${name}.yaml`);
 }
 
 /**
- * Load and validate a tenant config. Throws ConfigError listing EVERY problem
+ * Load and validate the agent config. Throws ConfigError listing EVERY problem
  * found, not just the first — a customer fixing their setup should get the
  * whole list in one pass rather than discovering it one run at a time.
  */
-export function loadConfig(tenant = process.env.TENANT || 'tenant') {
-  const path = configPath(tenant);
+export function loadConfig(name = process.env.AGENT_CONFIG || 'agent') {
+  const path = configPath(name);
 
   if (!existsSync(path)) {
     throw new ConfigError([
       `No config at ${path}`,
-      `Create one:  cp config/tenant.example.yaml config/${tenant}.yaml`,
-      `Or let the setup agent interview you and write it:  claude /setup`,
+      `Create one:  cp config/agent.example.yaml config/${name}.yaml`,
+      `Or let the agent interview you and write it: DM the bot after bootstrap.`,
     ]);
   }
 
@@ -59,6 +70,32 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
     throw new ConfigError([`${path} is empty or is not a YAML mapping.`]);
   }
 
+  const problems = validateConfig(cfg);
+  if (problems.length) throw new ConfigError(problems);
+
+  // Normalise a few derived values so callers never re-derive them.
+  cfg.__meta = {
+    name,
+    path,
+    stateDir: resolveStateDir(),
+    voicePackPath: cfg.voice_pack
+      ? (isAbsolute(cfg.voice_pack) ? cfg.voice_pack : join(ROOT, cfg.voice_pack))
+      : null,
+    plays: resolvePlays(cfg),
+    ledgerPath: isAbsolute(cfg.state.ledger)
+      ? cfg.state.ledger
+      : join(ROOT, cfg.state.ledger),
+    enabledMotions: (cfg.motions || []).filter((m) => m?.enabled),
+  };
+  return cfg;
+}
+
+/**
+ * Pure validation: returns the list of problems (empty = valid). Split out from
+ * loadConfig so onboarding's set_config can validate a candidate BEFORE writing
+ * it, against exactly the rules a hand-edit would face.
+ */
+export function validateConfig(cfg) {
   const problems = [];
   const need = (value, where, hint) => {
     if (isBlank(value)) problems.push(`${where} is required. ${hint}`);
@@ -73,6 +110,12 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
     } catch {
       problems.push(`client.timezone "${cfg.client.timezone}" is not a valid IANA timezone.`);
     }
+  }
+
+  need(cfg.icp, 'icp', 'Describe who you sell to, including who is NOT a fit.');
+
+  if (!['supervised', 'daily'].includes(cfg.run_mode)) {
+    problems.push('run_mode must be either "supervised" or "daily".');
   }
 
   // --- providers ------------------------------------------------------------
@@ -110,54 +153,111 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
     );
   }
 
-  // --- caps -----------------------------------------------------------------
-  const min = cfg.caps?.min_per_day;
-  const max = cfg.caps?.max_per_day;
-  if (!Number.isInteger(min) || min < 0) problems.push('caps.min_per_day must be a non-negative integer.');
-  if (!Number.isInteger(max) || max < 1) problems.push('caps.max_per_day must be a positive integer.');
-  if (Number.isInteger(min) && Number.isInteger(max) && min > max) {
-    problems.push(`caps.min_per_day (${min}) cannot exceed caps.max_per_day (${max}).`);
-  }
-  if (!['supervised', 'daily'].includes(cfg.run_mode)) {
-    problems.push('run_mode must be either "supervised" or "daily".');
-  }
-
-  need(cfg.icp, 'icp', 'Describe who you sell to, including who is NOT a fit.');
-
-  // --- buckets --------------------------------------------------------------
-  if (!Array.isArray(cfg.buckets) || cfg.buckets.length === 0) {
-    problems.push('buckets must be a non-empty list.');
+  // --- motions --------------------------------------------------------------
+  if (!Array.isArray(cfg.motions) || cfg.motions.length === 0) {
+    problems.push('motions must be a non-empty list. See config/agent.example.yaml for the four kinds.');
   } else {
-    const enabled = cfg.buckets.filter((b) => b?.enabled);
+    const enabled = cfg.motions.filter((m) => m?.enabled);
     if (enabled.length === 0) {
-      problems.push('No bucket is enabled, so the agent would have nothing to work. Enable at least one.');
+      problems.push('No motion is enabled, so the agent would have nothing to do. Enable at least one.');
     }
     const seen = new Set();
-    for (const b of cfg.buckets) {
-      const id = b?.id ?? '(unnamed)';
-      if (isBlank(b?.id)) problems.push('Every bucket needs an id.');
-      else if (seen.has(b.id)) problems.push(`Duplicate bucket id "${b.id}".`);
-      else seen.add(b.id);
+    for (const m of cfg.motions) {
+      const id = m?.id ?? '(unnamed)';
+      if (isBlank(m?.id)) problems.push('Every motion needs an id.');
+      else if (seen.has(m.id)) problems.push(`Duplicate motion id "${m.id}".`);
+      else seen.add(m.id);
 
-      if (!b?.enabled) continue; // only validate what will actually run
-
-      if (!Number.isInteger(b.priority)) problems.push(`bucket "${id}": priority must be an integer (1 runs first).`);
-      if (!Number.isInteger(b.daily_cap) || b.daily_cap < 1) problems.push(`bucket "${id}": daily_cap must be a positive integer.`);
-      if (isBlank(b.play)) problems.push(`bucket "${id}": play is required.`);
-      if (isBlank(b.source?.type)) problems.push(`bucket "${id}": source.type is required.`);
-
-      // A placeholder list id is the single most likely misconfiguration, and
-      // the failure mode is working the wrong list of humans.
-      if (b.allow_open_deals !== undefined && typeof b.allow_open_deals !== 'boolean') {
-        problems.push(`bucket "${id}": allow_open_deals must be true or false.`);
+      if (!MOTION_KINDS.includes(m?.kind)) {
+        problems.push(`motion "${id}": kind must be one of ${MOTION_KINDS.join(' | ')}.`);
       }
-      if (b.source?.type === 'crm.list' && isBlank(b.source?.list_id)) {
-        problems.push(
-          `bucket "${id}": source.list_id is still a placeholder. ` +
-          `Put your real CRM list id here, or set enabled: false.`,
-        );
+
+      if (!m?.enabled) continue; // only validate what will actually run
+
+      if (isBlank(m.schedule) || !CRON_SHAPE.test(String(m.schedule).trim())) {
+        problems.push(`motion "${id}": schedule must be a five-field cron line (e.g. "0 8 * * 1-5").`);
+      }
+      if (isBlank(m.play)) problems.push(`motion "${id}": play is required.`);
+
+      switch (m.kind) {
+        case 'outbound': {
+          if (!Number.isInteger(m.daily_cap) || m.daily_cap < 1) {
+            problems.push(`motion "${id}": daily_cap must be a positive integer.`);
+          }
+          if (m.allow_open_deals !== undefined && typeof m.allow_open_deals !== 'boolean') {
+            problems.push(`motion "${id}": allow_open_deals must be true or false.`);
+          }
+          if (!Array.isArray(m.sources) || m.sources.length === 0) {
+            problems.push(`motion "${id}": sources must be a non-empty list, warmest first.`);
+          }
+          break;
+        }
+        case 'inbound': {
+          if (!Array.isArray(m.sources) || m.sources.length === 0) {
+            problems.push(`motion "${id}": sources must list the hand-raise source(s).`);
+          }
+          break;
+        }
+        case 'deal_followup': {
+          need(m.pipeline_id, `motion "${id}": pipeline_id`, 'Which CRM pipeline it works.');
+          if (!Number.isInteger(m.stall_days) || m.stall_days < 1) {
+            problems.push(`motion "${id}": stall_days must be a positive integer.`);
+          }
+          // The change allowlist IS the permission: a field not listed cannot
+          // even be proposed, let alone applied.
+          if (!Array.isArray(m.crm_fields_may_change) || m.crm_fields_may_change.length === 0) {
+            problems.push(
+              `motion "${id}": crm_fields_may_change must list the CRM properties this motion ` +
+              `may propose changing. An empty list means it can propose nothing — disable the ` +
+              `motion instead.`,
+            );
+          }
+          if (m.evening_schedule !== undefined &&
+              (isBlank(m.evening_schedule) || !CRON_SHAPE.test(String(m.evening_schedule).trim()))) {
+            problems.push(`motion "${id}": evening_schedule must be a five-field cron line if set.`);
+          }
+          break;
+        }
+        case 'cs_postclose': {
+          need(m.owner_match, `motion "${id}": owner_match`, 'How cards route to the CS owner.');
+          need(m.dashboard?.base_url, `motion "${id}": dashboard.base_url`, 'The CS data source.');
+          // Liveness is not identity: a stale host answering ok:true swallowed
+          // work in production. The identity string is asserted on every read.
+          need(m.dashboard?.identity, `motion "${id}": dashboard.identity`,
+            'The service identity string asserted on every read — a health check that only ' +
+            'proves SOMETHING answered is how cards vanished in production.');
+          break;
+        }
+      }
+
+      // Placeholder list ids are the single most likely misconfiguration, and
+      // the failure mode is working the wrong list of humans.
+      for (const s of m.sources || []) {
+        if (s?.type === 'crm.list' && isBlank(s?.list_id)) {
+          problems.push(
+            `motion "${id}": a crm.list source has a placeholder list_id. ` +
+            `Put your real CRM list id there, or remove the source.`,
+          );
+        }
       }
     }
+  }
+
+  // --- approval -------------------------------------------------------------
+  if (cfg.approval !== undefined) {
+    if (isBlank(cfg.approval.channel) || !/^C[A-Z0-9]{6,}$/i.test(String(cfg.approval.channel))) {
+      problems.push('approval.channel must be a Slack channel ID (Cxxxxxxxx), not a #name.');
+    }
+    const undo = cfg.approval.undo_seconds;
+    if (!Number.isInteger(undo) || undo < 10 || undo > 300) {
+      problems.push('approval.undo_seconds must be an integer between 10 and 300.');
+    }
+    const exp = cfg.approval.expiry_hours;
+    if (!Number.isInteger(exp) || exp < 1) {
+      problems.push('approval.expiry_hours must be a positive integer. Expired cards are NEVER applied late.');
+    }
+  } else {
+    problems.push('approval is required: channel, undo_seconds, expiry_hours.');
   }
 
   // --- ownership ------------------------------------------------------------
@@ -190,6 +290,49 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
           `person's account — and that is not reversible.`,
         );
       }
+      if (!isBlank(o?.slack_user_id) && !/^U[A-Z0-9]{6,}$/i.test(String(o.slack_user_id))) {
+        problems.push(`owner "${id}": slack_user_id "${o.slack_user_id}" is not a Slack user ID (Uxxxxxxxx).`);
+      }
+    }
+  }
+
+  // --- limits (enforced against the ledger, so they must be real numbers) ---
+  if (!cfg.limits || typeof cfg.limits !== 'object') {
+    problems.push('limits is required: per_day, per_week, per_contact_per_quarter, per_company_per_quarter, enrichment_credits_per_run.');
+  } else {
+    for (const key of ['per_day', 'per_week', 'per_contact_per_quarter',
+                       'per_company_per_quarter', 'enrichment_credits_per_run']) {
+      const v = cfg.limits[key];
+      if (!Number.isInteger(v) || v < 1) {
+        problems.push(`limits.${key} must be a positive integer. These are enforced in code — a blank is not "unlimited", it is invalid.`);
+      }
+    }
+    if (Number.isInteger(cfg.limits.per_day) && Number.isInteger(cfg.limits.per_week) &&
+        cfg.limits.per_day > cfg.limits.per_week) {
+      problems.push(`limits.per_day (${cfg.limits.per_day}) cannot exceed limits.per_week (${cfg.limits.per_week}).`);
+    }
+  }
+
+  // --- suppression ----------------------------------------------------------
+  if (!Array.isArray(cfg.suppression) || cfg.suppression.length === 0) {
+    problems.push('suppression must list at least one check. Removing all of them means prospecting your own customers.');
+  }
+
+  if (cfg.dedupe && !Number.isInteger(cfg.dedupe.rework_cooldown_days)) {
+    problems.push('dedupe.rework_cooldown_days must be an integer number of days.');
+  }
+
+  // --- flows ----------------------------------------------------------------
+  // The allowlist IS the permission. Empty is valid and means "no flows" —
+  // but a listed flow must be a real one, not a placeholder.
+  if (cfg.flows !== undefined) {
+    if (!Array.isArray(cfg.flows)) {
+      problems.push('flows must be a list (empty means the agent may enrol into no flows).');
+    } else {
+      for (const f of cfg.flows) {
+        if (isBlank(f?.id)) problems.push('Every entry in flows needs a real id — the allowlist is the permission.');
+        if (isBlank(f?.name)) problems.push(`flow "${f?.id ?? '?'}": name is required; it is shown on enrolment cards.`);
+      }
     }
   }
 
@@ -216,50 +359,33 @@ export function loadConfig(tenant = process.env.TENANT || 'tenant') {
         problems.push(`chat.allowed_channels entry "${c}" is not a Slack channel ID. Use the Cxxxxxxxx form, not #name.`);
       }
     }
+    if (cfg.chat.campaigns_enabled !== undefined && typeof cfg.chat.campaigns_enabled !== 'boolean') {
+      problems.push('chat.campaigns_enabled must be true or false.');
+    }
   }
 
-  // --- suppression ----------------------------------------------------------
-  if (!Array.isArray(cfg.suppression) || cfg.suppression.length === 0) {
-    problems.push('suppression must list at least one check. Removing all of them means prospecting your own customers.');
+  // --- slack operator ---------------------------------------------------------
+  // Bound by claim code at first boot; required thereafter. Onboarding and
+  // set_config refuse to change it — only the claim flow writes it.
+  if (!isBlank(cfg.slack?.operator) && !/^U[A-Z0-9]{6,}$/i.test(String(cfg.slack.operator))) {
+    problems.push(`slack.operator "${cfg.slack.operator}" is not a Slack user ID (Uxxxxxxxx).`);
   }
-  // The orchestrator reads and writes state.lessons on every run — it is the
-  // feedback-learning loop. A missing key means the agent is told to append
-  // corrections to a path that does not exist, and the learning silently
-  // never happens.
-  if (isBlank(cfg.state?.lessons)) {
+
+  // --- state ----------------------------------------------------------------
+  // One database, not a directory of JSONL files. Lessons live IN the ledger
+  // (a table, host-written), so there is deliberately no state.lessons key —
+  // a config carrying one is from the old schema and should fail loudly.
+  if (isBlank(cfg.state?.ledger)) {
+    problems.push('state.ledger is required — the SQLite database holding identity, decisions, caps and lessons. Use "state/ledger.db".');
+  }
+  if (!isBlank(cfg.state?.lessons)) {
     problems.push(
-      'state.lessons is required. It is where the agent records corrections from ' +
-      'the humans who approve drafts, and it is read before drafting on every run. ' +
-      'Without it the agent cannot learn from feedback. Use "state/lessons.md".',
+      'state.lessons is no longer a file — lessons live in the ledger database, written only ' +
+      'by the host. Remove the state.lessons key.',
     );
   }
-  if (isBlank(cfg.state?.ledger)) {
-    problems.push('state.ledger is required — it is the worked-contact history that prevents contacting someone twice.');
-  }
 
-  if (cfg.dedupe && !Number.isInteger(cfg.dedupe.rework_cooldown_days)) {
-    problems.push('dedupe.rework_cooldown_days must be an integer number of days.');
-  }
-
-  if (problems.length) throw new ConfigError(problems);
-
-  // Normalise a few derived values so callers never re-derive them.
-  cfg.__meta = {
-    tenant,
-    path,
-    stateDir: resolveStateDir(),
-    voicePackPath: cfg.voice_pack
-      ? (isAbsolute(cfg.voice_pack) ? cfg.voice_pack : join(ROOT, cfg.voice_pack))
-      : null,
-    plays: resolvePlays(cfg),
-    lessonsPath: cfg.state?.lessons
-      ? (isAbsolute(cfg.state.lessons) ? cfg.state.lessons : join(resolveStateDir(), cfg.state.lessons.replace(/^state[\/]/, '')))
-      : null,
-    effectiveCap: cfg.run_mode === 'supervised'
-      ? (cfg.caps?.supervised_run_cap ?? 3)
-      : cfg.caps.max_per_day,
-  };
-  return cfg;
+  return problems;
 }
 
 /**
@@ -348,6 +474,19 @@ export function checkEnvironment({ dryRun = false } = {}) {
       : 'Set ANTHROPIC_API_KEY (pay-as-you-go) or CLAUDE_CODE_OAUTH_TOKEN (existing Claude subscription). See .env.example.',
   });
 
+  // Setting both is a real footgun: the API key silently takes precedence, so
+  // a customer who thinks they are on their subscription is being billed per
+  // token. Refuse to guess which one they meant.
+  if (has('ANTHROPIC_API_KEY') && has('CLAUDE_CODE_OAUTH_TOKEN')) {
+    checks.push({
+      key: 'model access (ambiguous)',
+      ok: false,
+      fatal: true,
+      detail: 'BOTH ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN are set. The API key wins ' +
+        'and bills per token even though the subscription token is present. Unset one.',
+    });
+  }
+
   checks.push({
     key: 'outreach platform',
     ok: has('FT_MCP_TOKEN'),
@@ -370,21 +509,12 @@ export function checkEnvironment({ dryRun = false } = {}) {
   });
 
   checks.push({
-    key: 'Slack chat (Socket Mode)',
+    key: 'Slack (Socket Mode)',
     ok: has('SLACK_APP_TOKEN') && has('SLACK_BOT_TOKEN'),
     fatal: false,
     detail: has('SLACK_APP_TOKEN')
-      ? (has('SLACK_BOT_TOKEN') ? 'SLACK_APP_TOKEN and SLACK_BOT_TOKEN are set' : 'SLACK_APP_TOKEN is set but SLACK_BOT_TOKEN is not — chat needs both.')
-      : 'SLACK_APP_TOKEN not set. Only needed for `npm run chat`; the scheduled run does not use it.',
-  });
-
-  checks.push({
-    key: 'Slack digest',
-    ok: has('SLACK_BOT_TOKEN'),
-    fatal: false,
-    detail: has('SLACK_BOT_TOKEN')
-      ? 'SLACK_BOT_TOKEN is set'
-      : 'Not set. The digest is skipped; approvals still land in the platform queue.',
+      ? (has('SLACK_BOT_TOKEN') ? 'SLACK_APP_TOKEN and SLACK_BOT_TOKEN are set' : 'SLACK_APP_TOKEN is set but SLACK_BOT_TOKEN is not — the host needs both.')
+      : 'SLACK_APP_TOKEN not set. The host needs it for approvals and chat.',
   });
 
   for (const [key, label] of [['SERPER_API_KEY', 'web search'], ['SCRAPECREATORS_API_KEY', 'ad-library signal']]) {
