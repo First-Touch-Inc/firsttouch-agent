@@ -395,11 +395,12 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
       properties: ['dealname', 'dealstage', 'closedate', 'amount', 'hubspot_owner_id', 'hs_lastmodifieddate'],
     }),
 
-    // Every contact matching the tenant's customer_signal — the input to the
-    // suppression seed, so the agent never prospects a paying customer. Uses
-    // the SAME signal config the validator requires, as HubSpot filters.
-    async listCustomers({ customer_signal, limit = 500 }) {
-      const filters = (customer_signal ?? [])
+    // Contacts matching a property/value signal — used for BOTH customer_signal
+    // (recognise customers) and suppression_signal (opt-out / DNC in the CRM),
+    // so the customer's own CRM stays the source of truth and this is just the
+    // portable query into it.
+    async listBySignal({ signal, limit = 2000 }) {
+      const filters = (signal ?? [])
         .filter((s) => s?.property)
         .map((s) => ({
           propertyName: s.property,
@@ -425,6 +426,12 @@ export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {
         after = res?.paging?.next?.after;
       } while (after && out.length < limit);
       return out;
+    },
+    listCustomers({ customer_signal, limit = 2000 }) {
+      return this.listBySignal({ signal: customer_signal, limit });
+    },
+    listSuppressed({ suppression_signal, limit = 5000 }) {
+      return this.listBySignal({ signal: suppression_signal, limit });
     },
 
     // --- apply path (`crm` interface): compare-and-set halves ---

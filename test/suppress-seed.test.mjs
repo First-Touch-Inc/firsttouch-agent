@@ -92,3 +92,28 @@ test('the seed is idempotent — re-running refreshes rather than duplicating', 
   const n = ledger.db.prepare("SELECT COUNT(*) c FROM suppressions WHERE scope='domain' AND value='x.com'").get().c;
   assert.equal(n, 1, 'one row, upserted');
 });
+
+// --- CRM suppression signal: DNC that lives in the CRM (the usual place) ------
+
+test('a CRM suppression signal suppresses opted-out contacts by email, not domain', async () => {
+  const ledger = openLedger(':memory:');
+  const crmSuppressed = async () => [
+    { email: 'optout@bigco.com', company_domain: 'bigco.com' },
+  ];
+  const summary = await seedSuppressions({ ledger, cfg: baseCfg(), crmSuppressed, now: NOW });
+  assert.equal(summary.crm_suppressed, 1);
+  assert.ok(ledger.suppressionFor({ email: 'optout@bigco.com' }), 'the opted-out person is suppressed');
+  assert.equal(ledger.suppressionFor({ email: 'colleague@bigco.com' }), null,
+    'one person opting out must NOT silence their whole company');
+});
+
+test('a suppression-signal CRM error is reported, prior rows kept', async () => {
+  const ledger = openLedger(':memory:');
+  await seedSuppressions({ ledger, cfg: baseCfg(), crmSuppressed: async () => [{ email: 'a@x.com' }], now: NOW });
+  const summary = await seedSuppressions({
+    ledger, cfg: baseCfg(), now: NOW,
+    crmSuppressed: async () => { throw new Error('CRM 500'); },
+  });
+  assert.match(summary.crm_error, /suppression signal/);
+  assert.ok(ledger.suppressionFor({ email: 'a@x.com' }), 'prior suppression survives an outage');
+});

@@ -1,7 +1,14 @@
-// Seed the suppressions table from the tenant's configured sources, so the
-// checks in tools-core/apply have something to find. Without this pass the
-// suppressions table is empty and "never prospects your customers" is a
-// promise nothing keeps — the single biggest QA finding.
+// Seed the suppressions table from the tenant's configured sources.
+//
+// WHERE THE TRUTH LIVES. The authoritative exclusion lists live in the
+// customer's own systems — FirstTouch's exclusion list, HubSpot/CRM opt-out
+// and unsubscribe status, and whatever DNC file they keep. This table is a
+// fast local CACHE of that truth, refreshed each run, PLUS the signals only we
+// have (the domain backstop for prospects with no CRM record, and — enforced
+// elsewhere — dedupe and the re-work cooldown). It is deliberately NOT the
+// source of truth, which is why FirstTouch's own exclusion check at enrolment
+// (ignoreExclusionCheck left false) stays as the final backstop: a stale cache
+// still cannot push an excluded contact through the platform.
 //
 // Runs at host boot and before every motion. Idempotent: it upserts, so a
 // re-run refreshes rather than duplicates. Sources, in order:
@@ -10,10 +17,14 @@
 //      Loaded as scope='email'/'domain', source='dnc', never expires.
 //   2. excluded_domains      — from config, source='config', never expires.
 //   3. CRM customers         — every contact whose customer_signal matches is
-//      suppressed by email AND company domain, source='crm_customer', with a
-//      refresh TTL so a churned customer eventually ages out.
-//   4. rework cooldown       — handled at query time in reserveTouch/dedupe,
-//      not seeded here (it is relative to the last touch, per subject).
+//      suppressed by email AND company domain, source='crm_customer'.
+//   4. CRM suppression signal — every contact whose suppression_signal matches
+//      (opt-out / unsubscribed / do-not-contact property IN THE CRM) is
+//      suppressed the same way, source='crm_suppressed'. This is how a
+//      customer whose DNC lives in HubSpot points us at it, portably.
+//   Both CRM sources carry a refresh TTL so a status change eventually ages
+//   out of the cache.
+//   5. rework cooldown       — handled at query time, not seeded here.
 //
 // The DNC file lives OUTSIDE the writable config so the agent cannot read or
 // edit it (it is a list of people who objected — privacy-sensitive, and an
@@ -58,8 +69,8 @@ export function parseDnc(text) {
  *   CRM cannot be reached this source is skipped (and reported), never
  *   silently treated as "no customers".
  */
-export async function seedSuppressions({ ledger, cfg, crmCustomers = null, now = () => new Date() }) {
-  const summary = { dnc_emails: 0, dnc_domains: 0, excluded_domains: 0, crm_customers: 0, crm_error: null };
+export async function seedSuppressions({ ledger, cfg, crmCustomers = null, crmSuppressed = null, now = () => new Date() }) {
+  const summary = { dnc_emails: 0, dnc_domains: 0, excluded_domains: 0, crm_customers: 0, crm_suppressed: 0, crm_error: null };
   const nowIso = now().toISOString();
 
   // 1. DNC file.
@@ -94,6 +105,26 @@ export async function seedSuppressions({ ledger, cfg, crmCustomers = null, now =
       // Never treat an unreachable CRM as "no customers" — that would let the
       // agent prospect the whole customer base. Report and leave prior rows.
       summary.crm_error = e.message;
+    }
+  }
+
+  // 4. CRM suppression signal — opt-out / unsubscribed / do-not-contact status
+  //    that lives in the customer's CRM (this is where most real DNC lives).
+  if (crmSuppressed) {
+    try {
+      const ttlDays = Number(cfg.suppression_refresh_days ?? 45);
+      const until = new Date(now().getTime() + ttlDays * 24 * 3600e3).toISOString();
+      const rows = await crmSuppressed();
+      for (const row of rows) {
+        if (row.email) { ledger.suppress('email', row.email, 'CRM opt-out / do-not-contact', 'crm_suppressed', until); summary.crm_suppressed++; }
+        // NB: opt-out is per-PERSON, so we do NOT suppress the whole domain
+        // here (unlike a customer account) — one unsubscribe must not silence
+        // an entire company.
+      }
+    } catch (e) {
+      summary.crm_error = summary.crm_error
+        ? `${summary.crm_error}; suppression signal: ${e.message}`
+        : `suppression signal: ${e.message}`;
     }
   }
 

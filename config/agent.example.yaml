@@ -34,6 +34,12 @@ providers:
     customer_signal:
       - property: "<lifecyclestage>"
         equals: "<customer>"
+    # Where your do-not-contact / opt-out list lives IN THE CRM. Most real DNC
+    # lives here, not in a file. The agent caches these each run and never
+    # contacts a match. Optional; add the property/value that means "opted out".
+    # suppression_signal:
+    #   - property: "hs_email_optout"
+    #     equals: "true"
 
 # ---------------------------------------------------------------------------
 # Motions: the jobs this agent does. Enable any subset; each runs on its own

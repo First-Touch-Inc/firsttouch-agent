@@ -346,6 +346,9 @@ async function refreshSuppressions(reason) {
     crmCustomers: crm
       ? () => crm.listCustomers({ customer_signal: cfg.providers?.crm?.customer_signal })
       : null,
+    crmSuppressed: crm && cfg.providers?.crm?.suppression_signal?.length
+      ? () => crm.listSuppressed({ suppression_signal: cfg.providers.crm.suppression_signal })
+      : null,
     now: () => new Date(),
   });
   if (summary.crm_error) {
