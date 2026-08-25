@@ -262,3 +262,30 @@ test('the provider calls through with the token and parses the result', async ()
   assert.deepEqual(r, { name: 'search_people', args: { q: 'VPs in Nebraska' } });
   assert.deepEqual(seen, [['https://mcp.clay.com', 'tok_123']], 'lazy: one connection, with the env token');
 });
+
+// --- DRY_RUN blocks all mutations at the provider (B-05) ---------------------
+
+import { firsttouchProvider } from '../runner/lib/providers.mjs';
+
+test('DRY_RUN makes the FirstTouch provider refuse every mutation, reads still work', async () => {
+  const fakeConnect = async () => ({
+    callTool: async (name) => ({ text: JSON.stringify({ tool: name }), isError: false }),
+  });
+  const provider = await firsttouchProvider({ token: 'x', dryRun: true, connectImpl: fakeConnect });
+
+  for (const [method, args] of [
+    ['createAction', { subject: {}, steps: [], ownerProviderId: 'u1' }],
+    ['completeTask', 't1'],
+    ['cancelAction', ['t1']],
+    ['enrolFlow', { flow_id: 'f', subject: {}, ownerProviderId: 'u1' }],
+  ]) {
+    await assert.rejects(() => provider[method](args), /DRY_RUN is on/, `${method} must refuse in a dry run`);
+  }
+  // A read is still allowed — a dry run researches and drafts.
+  assert.deepEqual(await provider.listTeamMembers(), { tool: 'list_team_members' });
+
+  // And with dryRun off, mutations are wired through.
+  const live = await firsttouchProvider({ token: 'x', dryRun: false, connectImpl: fakeConnect });
+  assert.equal(typeof live.completeTask, 'function');
+  assert.deepEqual(await live.completeTask('t1'), { tool: 'complete_task' });
+});

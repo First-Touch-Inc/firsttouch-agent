@@ -33,7 +33,11 @@ COPY . .
 
 # State and tenant files live on a mounted volume. Without one, the dedupe
 # ledger resets on every deploy and the same people get contacted twice.
-ENV STATE_DIR=/data/state \
+# Put the project's node_modules/.bin on PATH so the host's `spawn('claude')`
+# resolves the CLI installed as a dependency. Without this the container boots
+# but every model spawn fails with ENOENT.
+ENV PATH=/app/node_modules/.bin:$PATH \
+    STATE_DIR=/data/state \
     CONFIG_DIR=/data/config \
     NODE_ENV=production
 VOLUME ["/data"]

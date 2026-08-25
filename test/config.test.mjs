@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, sep } from 'node:path';
 import { dump, load } from 'js-yaml';
 import { loadConfig, validateConfig, ConfigError, ROOT, MOTION_KINDS } from '../runner/lib/config.mjs';
 
@@ -382,4 +382,19 @@ test('the old state.lessons file key is rejected with a migration message', () =
   const p = problemsFrom((c) => { c.state.lessons = 'state/lessons.md'; });
   assert.match(p, /no longer a file/);
   assert.match(p, /Remove the state\.lessons key/);
+});
+
+// --- the ledger lands on the writable volume (STATE_DIR), not the engine tree
+
+test('a "state/…" ledger path resolves under STATE_DIR, not the repo root', () => {
+  const saved = process.env.STATE_DIR;
+  process.env.STATE_DIR = '/data/state';
+  try {
+    const cfg = loadWith(); // state.ledger is "state/ledger.db" in the example
+    const p = cfg.__meta.ledgerPath.split(sep).join('/');
+    assert.match(p, /\/data\/state\/ledger\.db$/,
+      'the ledger must live on the writable volume, or SQLite cannot create it in the container');
+  } finally {
+    if (saved === undefined) delete process.env.STATE_DIR; else process.env.STATE_DIR = saved;
+  }
 });

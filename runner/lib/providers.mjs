@@ -24,9 +24,13 @@ function parseJsonText(text, context) {
 }
 
 /** The FirstTouch adapter: reads, enrichment, action staging and completion. */
-export async function firsttouchProvider({ token = process.env.FT_MCP_TOKEN } = {}) {
+export async function firsttouchProvider({
+  token = process.env.FT_MCP_TOKEN,
+  dryRun = process.env.DRY_RUN === '1',
+  connectImpl = connect,
+} = {}) {
   if (!token) throw new Error('FT_MCP_TOKEN is not set — the FirstTouch adapter cannot start.');
-  const client = await connect({ url: FT_URL(), token });
+  const client = await connectImpl({ url: FT_URL(), token });
 
   const call = async (name, args) => {
     const { text, isError } = await client.callTool(name, args);
@@ -34,11 +38,30 @@ export async function firsttouchProvider({ token = process.env.FT_MCP_TOKEN } = 
     return parseJsonText(text, name);
   };
 
-  return {
+  // In a dry run NOTHING that changes the outside world may happen — not even
+  // when a human clicks Approve on a card. The apply path surfaces the thrown
+  // error as a conflict, so the card shows "not applied (dry run)" instead of
+  // sending. This is the last line: DRY_RUN is also gated upstream, but a
+  // provider that refuses is the guarantee.
+  const noMutations = (name) => async () => {
+    throw new Error(`DRY_RUN is on — refusing to ${name}. Unset DRY_RUN to let approvals actually send.`);
+  };
+
+  const api = {
     // --- free reads (tools-core) ---
     listTeamMembers: () => call('list_team_members', {}),
     listSenderConnections: () => call('list_linkedin_team_connections', {}),
     getCurrentUser: () => call('get_current_user', {}),
+
+    // --- source sweeps: the warm signals the motions advertise ---
+    // Engagers on a monitored LinkedIn profile/company (likes, comments).
+    listEngagers: (args) => call('list_social_engagement_engagers', args ?? {}),
+    // A HubSpot list PREVIEW returns hydrated contacts (name, email, title),
+    // unlike raw membership which is bare ids — this is what a sweep needs.
+    previewList: ({ list_id, limit = 100 }) => call('preview_hubspot_list', { listId: list_id, limit }),
+    // Prospect discovery from ICP filters (chat campaigns like "VPs of Sales
+    // in Nebraska").
+    discoverContacts: (filters) => call('discover_contacts', filters ?? {}),
 
     // --- paid reads (tools-core, behind the enrichment enum) ---
     enrichPerson: (subject) => call('enrich_contact', {
@@ -114,6 +137,14 @@ export async function firsttouchProvider({ token = process.env.FT_MCP_TOKEN } = 
       assignedUserId: ownerProviderId,
     }),
   };
+
+  if (dryRun) {
+    api.createAction = noMutations('create an action');
+    api.completeTask = noMutations('complete a task');
+    api.cancelAction = noMutations('cancel an action');
+    api.enrolFlow = noMutations('enrol a flow');
+  }
+  return api;
 }
 
 /**

@@ -387,19 +387,47 @@ async function runMotion(motion, { dry = false } = {}) {
   log(`motion ${motion.id} finished`);
 }
 
+// Conversation memory: each spawn is a FRESH headless session with no memory
+// of the last turn, so a multi-turn exchange (onboarding especially) needs the
+// recent history threaded into the prompt or it can never get past its first
+// question. Keyed by channel:thread; a short ring per conversation, capped so
+// it cannot grow without bound.
+const convo = new Map();
+const convoKey = (channel, thread) => `${channel}:${thread || channel}`;
+function recordTurn(channel, thread, role, text) {
+  const key = convoKey(channel, thread);
+  const turns = convo.get(key) ?? [];
+  turns.push({ role, text: String(text).slice(0, 1500) });
+  while (turns.length > 12) turns.shift();
+  convo.set(key, turns);
+  if (convo.size > 200) convo.delete(convo.keys().next().value);
+}
+function historyBlock(channel, thread) {
+  const turns = convo.get(convoKey(channel, thread)) ?? [];
+  if (turns.length === 0) return '';
+  return `\n--- Conversation so far (oldest first) ---\n` +
+    turns.map((t) => `${t.role === 'user' ? 'Them' : 'You'}: ${t.text}`).join('\n');
+}
+
 async function runChat(text, user, channel, thread) {
   const isOperator = user === operator;
+  recordTurn(channel, thread, 'user', text);
   const prompt = [
     commonContext(),
-    `\n--- Chat turn ---`,
+    historyBlock(channel, thread),
+    `\n--- This turn ---`,
     `From Slack user ${user}${isOperator ? ' (the operator)' : ''}: ${text}`,
-    `Answer in plain prose for Slack. You may run one-off work: research, drafts,`,
-    `flow enrolments, and (for real requests, not swept content) campaigns via propose_campaign —`,
-    `each lands as an approval card. ${isOperator ? 'The operator may also ask you to update config or plays via set_config/write_play.' : 'Config and play changes are operator-only; decline politely.'}`,
+    `Answer in plain prose for Slack, continuing the conversation above. You may run one-off work:`,
+    `research, drafts, flow enrolments, and (for real requests, not swept content) campaigns via`,
+    `propose_campaign — each lands as an approval card. ${isOperator ? 'The operator may also ask you to update config or plays via set_config/write_play.' : 'Config and play changes are operator-only; decline politely.'}`,
     `If a tool refuses, relay the reason honestly.`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
   const res = await queueSpawn({ prompt, mode: 'chat', isOperator, timeoutMs: 8 * 60 * 1000 });
-  await say(channel, (res.result || res.error || 'I produced no answer, which is a bug.').slice(0, 3800), thread);
+  // The operator may have written config/plays this turn; pick it up now.
+  if (isOperator) reloadConfig();
+  const answer = (res.result || res.error || 'I produced no answer, which is a bug.').slice(0, 3800);
+  recordTurn(channel, thread, 'assistant', answer);
+  await say(channel, answer, thread);
 }
 
 // --- card posting ------------------------------------------------------------
@@ -548,7 +576,25 @@ async function tickBody() {
 setInterval(() => tick().catch((e) => log(`tick error: ${e.message}`)), TICK_MS);
 
 // --- Slack event handling ----------------------------------------------------
-const ALLOWED_USERS = new Set(cfg.chat?.allowed_users || []);
+let ALLOWED_USERS = new Set(cfg.chat?.allowed_users || []);
+let ALLOWED_CHANNELS = new Set(cfg.chat?.allowed_channels || []);
+
+// Reload config after a write (set_config / onboarding / writeOperator) so the
+// long-lived host's apply, schedule, allowlists and channels see the change
+// without a restart. Closures reference the module-level `cfg` binding, so a
+// reassignment propagates. A bad on-disk edit is logged and the old config is
+// kept rather than crashing the host.
+function reloadConfig() {
+  try {
+    const fresh = loadConfig();
+    cfg = fresh;
+    ALLOWED_USERS = new Set(cfg.chat?.allowed_users || []);
+    ALLOWED_CHANNELS = new Set(cfg.chat?.allowed_channels || []);
+    if (cfg.slack?.operator) operator = cfg.slack.operator;
+  } catch (e) {
+    log(`config reload skipped — on-disk config is invalid, keeping the running one: ${e.message}`);
+  }
+}
 const seenEvents = new Set();
 
 async function handleEvent(ev) {
@@ -577,25 +623,55 @@ async function handleEvent(ev) {
     log(`ignored message from ${ev.user} (not allowed)`);
     return;
   }
+  // Channel allowlist: when set, the bot answers @-mentions only in listed
+  // channels (DMs from allowed users always work). Without this a mention in
+  // #general leaked drafts into a public channel.
+  if (ev.type === 'app_mention' && ALLOWED_CHANNELS.size && !ALLOWED_CHANNELS.has(ev.channel)) {
+    log(`ignored mention in ${ev.channel} (not in chat.allowed_channels)`);
+    return;
+  }
   if (!text) return;
 
   await slack('reactions.add', { channel: ev.channel, timestamp: ev.ts, name: 'eyes' });
-  if (/^onboard\b/i.test(text) && ev.user === operator) {
-    const prompt = [
-      commonContext(),
-      `\n--- ONBOARDING (operator: ${ev.user}) ---`,
-      `Interview the operator conversationally, ONE question at a time, validating live:`,
-      `motions to enable → an approvals channel per named sender ("make #name-approvals and invite me") →`,
-      `owners and their connected senders → per-motion specifics → voice (3 questions) → write config via`,
-      `set_config and the voice pack via write_voice_pack → finish by proposing a supervised dry run.`,
-      `Open by proving what already works (list_team_members). Reply now with ONLY your first message.`,
-    ].join('\n');
-    const res = await queueSpawn({ prompt, mode: 'onboarding', isOperator: true, timeoutMs: 8 * 60 * 1000 });
-    await say(ev.channel, (res.result || res.error || '').slice(0, 3800), ev.thread_ts || ev.ts);
+  const thread = ev.thread_ts || ev.ts;
+
+  // Onboarding is a PERSISTENT mode, not a one-shot: it stays active until the
+  // operator says "done" (or config is complete), and every turn carries the
+  // conversation history so a fresh spawn can continue past its first question.
+  if (ev.user === operator && (/^onboard\b/i.test(text) || onboardingActive)) {
+    if (/^onboard\b/i.test(text)) onboardingActive = true;
+    if (/^(done|finished|that'?s it|stop onboarding)\b/i.test(text)) {
+      onboardingActive = false;
+      await say(ev.channel, `Onboarding done. DM me any time to run a motion, ask a question, or start a campaign.`, thread);
+      return;
+    }
+    await runOnboarding(text, ev.channel, thread);
     return;
   }
-  runChat(text, ev.user, ev.channel, ev.thread_ts || ev.ts)
-    .catch((e) => log(`chat failed: ${e.message}`));
+  runChat(text, ev.user, ev.channel, thread).catch((e) => log(`chat failed: ${e.message}`));
+}
+
+let onboardingActive = false;
+async function runOnboarding(text, channel, thread) {
+  recordTurn(channel, thread, 'user', text);
+  const prompt = [
+    commonContext(),
+    historyBlock(channel, thread),
+    `\n--- ONBOARDING (you are interviewing the operator) ---`,
+    `Continue the conversation above. Interview ONE question at a time, validating live:`,
+    `motions to enable → an approvals channel per named sender ("make #name-approvals and invite me") →`,
+    `owners and their connected senders → per-motion specifics → voice (3 questions) → write config via`,
+    `set_config and the voice pack via write_voice_pack → finish by proposing a supervised dry run.`,
+    convo.get(convoKey(channel, thread))?.length <= 1
+      ? `This is the START. Open by proving what already works (list_team_members), then ask your first question.`
+      : `React to what they just said, then ask the next single question (or confirm you have written config).`,
+    `Reply with ONLY your next message.`,
+  ].filter(Boolean).join('\n');
+  const res = await queueSpawn({ prompt, mode: 'onboarding', isOperator: true, timeoutMs: 8 * 60 * 1000 });
+  reloadConfig(); // onboarding writes config as it goes
+  const answer = (res.result || res.error || '…').slice(0, 3800);
+  recordTurn(channel, thread, 'assistant', answer);
+  await say(channel, answer, thread);
 }
 
 async function handleInteraction(payload) {

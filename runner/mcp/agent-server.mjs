@@ -88,6 +88,24 @@ const TOOL_SCHEMAS = {
     description: 'The flows this agent may enrol contacts into. The list IS the permission.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  list_engagers: {
+    description: 'People who engaged (liked/commented) on your monitored LinkedIn profiles/pages — the warmest outbound source.',
+    inputSchema: { type: 'object', properties: { since: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false },
+  },
+  preview_list: {
+    description: 'Hydrated members of a CRM list (name, email, title) — use this to sweep a list, not crm_get_list which returns bare ids.',
+    inputSchema: { type: 'object', required: ['list_id'], properties: { list_id: { type: 'string' }, limit: { type: 'number' } }, additionalProperties: false },
+  },
+  discover_contacts: {
+    description: 'Find prospects by ICP filters (title, location, industry, company). For chat campaigns like "VPs of Sales in Nebraska".',
+    inputSchema: { type: 'object', properties: {
+      titles: { type: 'array', items: { type: 'string' } },
+      locations: { type: 'array', items: { type: 'string' } },
+      industries: { type: 'array', items: { type: 'string' } },
+      company_domains: { type: 'array', items: { type: 'string' } },
+      limit: { type: 'number' },
+    }, additionalProperties: false },
+  },
   dashboard_read: {
     description: 'Read a path from the configured account dashboard (cs_postclose). Absolute path only — the base URL and identity come from config.',
     inputSchema: {

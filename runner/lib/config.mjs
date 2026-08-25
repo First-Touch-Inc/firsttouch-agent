@@ -98,9 +98,13 @@ export function loadConfig(name = process.env.AGENT_CONFIG || 'agent') {
     stateDir: resolveStateDir(),
     voicePackPath: resolveTenantPath(cfg.voice_pack),
     plays: resolvePlays(cfg),
+    // The ledger MUST land on the writable volume (STATE_DIR), not under the
+    // read-only engine tree. A "state/…" prefix is resolved against STATE_DIR
+    // so the documented default lands on the volume in a container instead of
+    // at /app/state where SQLite cannot create the file.
     ledgerPath: isAbsolute(cfg.state.ledger)
       ? cfg.state.ledger
-      : join(ROOT, cfg.state.ledger),
+      : join(resolveStateDir(), String(cfg.state.ledger).replace(/^state[\/]/, '')),
     enabledMotions: (cfg.motions || []).filter((m) => m?.enabled),
   };
   return cfg;

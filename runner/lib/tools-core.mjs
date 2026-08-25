@@ -94,6 +94,10 @@ export class ToolCore {
     list_team_members:        { modes: ['motion', 'chat', 'onboarding'] },
     list_sender_connections:  { modes: ['motion', 'chat', 'onboarding'] },
     list_declared_flows:      { modes: ['motion', 'chat', 'onboarding'] },
+    // source sweeps — the warm signals the motions actually work
+    list_engagers:            { modes: ['motion', 'chat'] },
+    preview_list:             { modes: ['motion', 'chat'] },
+    discover_contacts:        { modes: ['motion', 'chat'] },
     // the CS dashboard (or any account-health API a tenant configures)
     dashboard_read:           { modes: ['motion', 'chat'] },
     // paid reads, credit-capped
@@ -206,6 +210,9 @@ export class ToolCore {
   _list_team_members()           { return this.p.ft.listTeamMembers(); }
   _list_sender_connections(args) { return this.p.ft.listSenderConnections(args); }
   _list_declared_flows()         { return { flows: this.cfg.flows ?? [] }; }
+  _list_engagers(args)           { return this.p.ft.listEngagers(args); }
+  _preview_list(args)            { return this.p.ft.previewList(args); }
+  _discover_contacts(args)       { return this.p.ft.discoverContacts(args); }
 
   // -------------------------------------------------------------------------
   // The dashboard read: the cs_postclose data source (or any account API).

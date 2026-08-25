@@ -1,63 +1,32 @@
 # Local and single-VPS self-hosting.
 #
-# Two ways to use this:
+#   cp .env.example .env      # fill it in (Slack + model + FirstTouch tokens)
+#   docker compose up -d      # start the always-on host
+#   docker compose logs -f    # watch for the claim code, then DM the bot
 #
-#   docker compose run --rm agent --dry     # one dry run, right now
-#   docker compose run --rm agent           # one real run, right now
-#   docker compose up -d scheduler          # run it every weekday morning
-#
-# Note there are no `ports:` here. This stack exposes nothing to the network —
-# the agent makes outbound calls only. If you ever add a port to this file, be
-# certain you know what is listening on it.
+# There are no `ports:` here. The host exposes nothing to the network — it
+# dials OUT to Slack, your CRM and FirstTouch. Nothing reaches in.
 
 services:
-  # One-shot. Does not stay running.
-  agent:
+  host:
     build: .
-    image: pipeline-agent
+    image: firsttouch-agent
     env_file: .env
     environment:
       STATE_DIR: /data/state
-    volumes:
-      - pipeline-state:/data
-      # Mount your config and voice pack read-only so a container cannot
-      # rewrite them, and so editing them locally takes effect immediately.
-      - ./config:/app/config:ro
-      - ./voice-pack.md:/app/voice-pack.md:ro
-
-  # Long-running scheduler. Uses the same image; the only difference is that it
-  # sleeps between runs. Prefer your platform's native cron if it has one —
-  # this exists for hosts that do not.
-  scheduler:
-    build: .
-    image: pipeline-agent
-    env_file: .env
-    environment:
-      STATE_DIR: /data/state
-      # Weekdays at 08:00 in the container's timezone.
-      CRON_SCHEDULE: "0 8 * * 1-5"
+      CONFIG_DIR: /data/config
       TZ: ${TZ:-UTC}
     volumes:
-      - pipeline-state:/data
-      - ./config:/app/config:ro
-      - ./voice-pack.md:/app/voice-pack.md:ro
-    command: ["node", "runner/scheduler.mjs"]
-    restart: unless-stopped
-
-  # Real-time Slack chat. Long-running, but still opens NO port — it dials out
-  # to Slack over a WebSocket. Note there is no `ports:` entry here either.
-  chat:
-    build: .
-    image: pipeline-agent
-    env_file: .env
-    environment:
-      STATE_DIR: /data/state
-    volumes:
-      - pipeline-state:/data
-      - ./config:/app/config:ro
-      - ./voice-pack.md:/app/voice-pack.md:ro
-    command: ["node", "runner/chat.mjs"]
+      # One writable volume holds config, plays, voice pack and the ledger.
+      # The agent owns this world; the engine in the image is read-only to it.
+      - agent-data:/data
+      # Optional: keep the operator-owned do-not-contact list OUTSIDE the
+      # agent-writable config, read-only, so the agent can neither read nor
+      # edit the list of people who objected.
+      # - ./do-not-contact.txt:/etc/agent/do-not-contact.txt:ro
+    # Seed config into /data on first boot (see seed note in the README's
+    # overlay pattern); a fresh volume starts empty and the bot onboards you.
     restart: unless-stopped
 
 volumes:
-  pipeline-state:
+  agent-data:
