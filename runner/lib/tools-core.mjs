@@ -63,6 +63,18 @@ export class ToolCore {
     this.p = providers;
     this.now = now;
     this.enrichmentSpent = 0;
+
+    // External tools: built from OPERATOR CONFIG at construction, never from
+    // model input — an unlisted tool has no entry here, so absence is the
+    // denial, same as everywhere else. Namespaced ext_<server>_<tool>.
+    this.externalTools = new Map();
+    if (mode !== 'onboarding') {
+      for (const ext of cfg.external_tools ?? []) {
+        for (const tool of ext.allow ?? []) {
+          this.externalTools.set(`ext_${ext.name}_${tool}`, { server: ext.name, tool });
+        }
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -97,12 +109,24 @@ export class ToolCore {
   };
 
   availableTools() {
-    return Object.entries(ToolCore.TOOLS)
-      .filter(([, def]) => def.modes.includes(this.mode))
-      .map(([name]) => name);
+    return [
+      ...Object.entries(ToolCore.TOOLS)
+        .filter(([, def]) => def.modes.includes(this.mode))
+        .map(([name]) => name),
+      ...this.externalTools.keys(),
+    ];
   }
 
   call(name, args = {}) {
+    // External tools route by the config-built table. The token lives with
+    // the provider; the model only ever names a tool that config allowed.
+    if (name.startsWith('ext_')) {
+      const ext = this.externalTools.get(name);
+      if (!ext) throw new ToolError(`unknown tool "${name}" — external tools exist only if config allows them`);
+      const server = this.p.external?.[ext.server];
+      if (!server) return { refused: `external server "${ext.server}" is not connected — check its token env var` };
+      return server.call(ext.tool, args);
+    }
     const def = ToolCore.TOOLS[name];
     if (!def) throw new ToolError(`unknown tool "${name}"`);
     if (!def.modes.includes(this.mode)) {

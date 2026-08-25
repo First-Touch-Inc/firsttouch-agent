@@ -392,6 +392,59 @@ export function validateConfig(cfg) {
     }
   }
 
+  // --- external tools ---------------------------------------------------------
+  // Any MCP server the tenant wants the agent to use — Clay, Apollo, Gong,
+  // an internal API, whatever. Proxied THROUGH the agent tool server, so the
+  // model never holds the token and only the explicitly allowed tools exist.
+  // The allowlist is the permission, and it is operator-written config: the
+  // agent's own set_config refuses URLs, so a chat message (or injected text)
+  // can never mount a new tool source.
+  if (cfg.external_tools !== undefined) {
+    if (!Array.isArray(cfg.external_tools)) {
+      problems.push('external_tools must be a list.');
+    } else {
+      const names = new Set();
+      // Verbs that act on the outside world. An external tool matching these
+      // is refused unless the operator says allow_mutations: true on the
+      // entry — an explicit, greppable "yes I mean it".
+      const DANGEROUS = /(^|_)(send|create|update|delete|remove|write|post|publish|pay|transfer|execute|cancel)(_|$)/i;
+      for (const t of cfg.external_tools) {
+        const name = t?.name ?? '(unnamed)';
+        if (!/^[a-z][a-z0-9_]{0,30}$/.test(String(t?.name ?? ''))) {
+          problems.push(`external_tools "${name}": name must be a short lowercase slug (it namespaces the tools as ext_<name>_*).`);
+        } else if (names.has(t.name)) {
+          problems.push(`external_tools: duplicate name "${t.name}".`);
+        } else names.add(t.name);
+
+        if (isBlank(t?.url) || !/^https:\/\//.test(String(t.url))) {
+          problems.push(`external_tools "${name}": url must be an https:// MCP endpoint.`);
+        }
+        if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(String(t?.token_env ?? ''))) {
+          problems.push(
+            `external_tools "${name}": token_env must be the NAME of an environment variable ` +
+            `(like CLAY_MCP_TOKEN), never the token itself — secrets do not belong in config.`,
+          );
+        }
+        if (!Array.isArray(t?.allow) || t.allow.length === 0 || t.allow.some((a) => isBlank(a))) {
+          problems.push(
+            `external_tools "${name}": allow must explicitly list the tool names the agent may ` +
+            `call. There is no wildcard — the allowlist IS the permission.`,
+          );
+        } else if (t.allow_mutations !== true) {
+          for (const toolName of t.allow) {
+            if (DANGEROUS.test(String(toolName))) {
+              problems.push(
+                `external_tools "${name}": tool "${toolName}" looks like it acts on the outside ` +
+                `world (send/create/delete/…). External tools bypass this agent's approval loop, ` +
+                `so allowing it requires an explicit allow_mutations: true on this entry.`,
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+
   // --- slack operator ---------------------------------------------------------
   // Bound by claim code at first boot; required thereafter. Onboarding and
   // set_config refuse to change it — only the claim flow writes it.

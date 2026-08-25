@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { loadConfig, configDir, ROOT } from '../lib/config.mjs';
 import { openLedger } from '../lib/ledger.mjs';
 import { ToolCore, ToolError, ENRICHMENT_KINDS, MODES } from '../lib/tools-core.mjs';
-import { firsttouchProvider, hubspotProvider, dashboardReader, loadExtraAdapters } from '../lib/providers.mjs';
+import { firsttouchProvider, hubspotProvider, dashboardReader, externalToolProviders, loadExtraAdapters } from '../lib/providers.mjs';
 
 console.log = console.error;
 console.info = console.error;
@@ -220,6 +220,7 @@ let providers = {
     listDeals: () => ({ refused: 'no CRM connected' }),
   },
   dash: dashboardReader(),
+  external: externalToolProviders(cfg),
   writeConfig(candidate) {
     // Serialise back to YAML via js-yaml (already a dependency of config).
     return import('js-yaml').then(({ dump }) => {

@@ -151,3 +151,108 @@ test('a prefix that merely LOOKS like the volume path is not refused', () => {
   });
   assert.equal(r.ok, true);
 });
+
+// --- external tools: any MCP server, tokens never near the model --------------
+
+import { externalToolProviders } from '../runner/lib/providers.mjs';
+import { validateConfig } from '../runner/lib/config.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { load } from 'js-yaml';
+import { ROOT } from '../runner/lib/config.mjs';
+
+function baseCfg() {
+  const cfg = load(readFileSync(join(ROOT, 'config', 'agent.example.yaml'), 'utf8'));
+  cfg.client.name = 'T';
+  cfg.providers.crm.customer_signal = [{ property: 'x', equals: 'y' }];
+  const outbound = cfg.motions.find((m) => m.kind === 'outbound');
+  for (const s of outbound.sources) if (s.type === 'crm.list') s.list_id = 'l1';
+  cfg.approval.digest_channel = 'C01234ABCDE';
+  cfg.approval_routing.owners = [{
+    id: 'p', name: 'Ada', provider_user_id: 'u1',
+    slack_user_id: 'U01234ABCDE', slack_channel: 'C01234ABCDE', match: 'default',
+  }];
+  cfg.chat.allowed_users = ['U01234ABCDE'];
+  return cfg;
+}
+
+test('a literal token in token_env is refused — secrets do not belong in config', () => {
+  const cfg = baseCfg();
+  cfg.external_tools = [{ name: 'clay', url: 'https://mcp.clay.com',
+    token_env: 'sk-live-abc123xyz', allow: ['search_people'] }];
+  const p = validateConfig(cfg).join('\n');
+  assert.match(p, /never the token itself/);
+});
+
+test('a mutating external tool needs allow_mutations: true, explicitly', () => {
+  const cfg = baseCfg();
+  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com',
+    token_env: 'X_TOKEN', allow: ['send_message'] }];
+  const p = validateConfig(cfg).join('\n');
+  assert.match(p, /allow_mutations/);
+  assert.match(p, /bypass this agent's approval loop/);
+
+  cfg.external_tools[0].allow_mutations = true;
+  assert.deepEqual(validateConfig(cfg), [], 'the explicit flag makes it valid');
+});
+
+test('an empty allow list is refused — there is no wildcard', () => {
+  const cfg = baseCfg();
+  cfg.external_tools = [{ name: 'x', url: 'https://mcp.x.com', token_env: 'X_TOKEN', allow: [] }];
+  assert.match(validateConfig(cfg).join('\n'), /allowlist IS the permission/);
+});
+
+test('allowed external tools appear namespaced; unlisted ones do not exist at all', () => {
+  const cfg = baseCfg();
+  cfg.external_tools = [{ name: 'clay', url: 'https://mcp.clay.com',
+    token_env: 'CLAY_TOKEN', allow: ['search_people', 'enrich_person'] }];
+  const core = new ToolCore({
+    cfg, ledger: openLedger(':memory:'), mode: 'chat', motionId: null,
+    providers: { external: { clay: { call: (tool, args) => ({ tool, args }) } } },
+  });
+  const tools = core.availableTools();
+  assert.ok(tools.includes('ext_clay_search_people'));
+  assert.ok(tools.includes('ext_clay_enrich_person'));
+  assert.ok(!tools.includes('ext_clay_delete_everything'));
+  assert.throws(() => core.call('ext_clay_delete_everything', {}),
+    /external tools exist only if config allows them/);
+  assert.deepEqual(core.call('ext_clay_search_people', { q: 'VPs' }),
+    { tool: 'search_people', args: { q: 'VPs' } });
+});
+
+test('onboarding sessions get no external tools', () => {
+  const cfg = baseCfg();
+  cfg.external_tools = [{ name: 'clay', url: 'https://mcp.clay.com',
+    token_env: 'CLAY_TOKEN', allow: ['search_people'] }];
+  const core = new ToolCore({
+    cfg, ledger: openLedger(':memory:'), mode: 'onboarding', motionId: null,
+    providers: {},
+  });
+  assert.ok(!core.availableTools().some((t) => t.startsWith('ext_')));
+});
+
+test('the provider re-checks the allowlist and reports a missing token as a refusal', async () => {
+  const cfg = { external_tools: [{ name: 'clay', url: 'https://mcp.clay.com',
+    token_env: 'CLAY_TOKEN_TEST', allow: ['search_people'] }] };
+  const servers = externalToolProviders(cfg, { env: {}, connectImpl: async () => { throw new Error('must not connect'); } });
+  const denied = await servers.clay.call('delete_everything', {});
+  assert.match(denied.refused, /not in the allow list/);
+  const noToken = await servers.clay.call('search_people', {});
+  assert.match(noToken.refused, /CLAY_TOKEN_TEST/);
+});
+
+test('the provider calls through with the token and parses the result', async () => {
+  const cfg = { external_tools: [{ name: 'clay', url: 'https://mcp.clay.com',
+    token_env: 'CLAY_TOKEN_TEST', allow: ['search_people'] }] };
+  const seen = [];
+  const servers = externalToolProviders(cfg, {
+    env: { CLAY_TOKEN_TEST: 'tok_123' },
+    connectImpl: async ({ url, token }) => {
+      seen.push([url, token]);
+      return { callTool: async (name, args) => ({ text: JSON.stringify({ name, args }), isError: false }) };
+    },
+  });
+  const r = await servers.clay.call('search_people', { q: 'VPs in Nebraska' });
+  assert.deepEqual(r, { name: 'search_people', args: { q: 'VPs in Nebraska' } });
+  assert.deepEqual(seen, [['https://mcp.clay.com', 'tok_123']], 'lazy: one connection, with the env token');
+});

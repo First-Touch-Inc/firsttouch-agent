@@ -205,6 +205,44 @@ export async function loadExtraAdapters(providers, cfg) {
   return (await mod.register({ providers, cfg })) ?? providers;
 }
 
+/**
+ * External tool servers: the tenant's own MCP endpoints (Clay, Apollo, Gong,
+ * an internal API…), declared in config.external_tools and proxied through
+ * the agent tool server. The token comes from the environment variable the
+ * config NAMES — the model's process never holds it, and this provider
+ * re-checks the allowlist on every call (belt and braces on top of the
+ * config-built tool table).
+ */
+export function externalToolProviders(cfg, { connectImpl = connect, env = process.env } = {}) {
+  const servers = {};
+  for (const ext of cfg.external_tools ?? []) {
+    const token = env[ext.token_env];
+    const allowed = new Set(ext.allow ?? []);
+    let clientPromise = null; // lazy: connect on first call, not at boot
+    servers[ext.name] = {
+      async call(tool, args) {
+        if (!allowed.has(tool)) {
+          return { refused: `tool "${tool}" is not in the allow list for external server "${ext.name}"` };
+        }
+        if (!token) {
+          return { refused: `external server "${ext.name}" needs ${ext.token_env} set in the environment` };
+        }
+        clientPromise ??= connectImpl({ url: ext.url, token });
+        try {
+          const client = await clientPromise;
+          const { text, isError } = await client.callTool(tool, args);
+          if (isError) return { refused: `${ext.name}/${tool}: ${text.slice(0, 400)}` };
+          try { return JSON.parse(text); } catch { return { raw: text.slice(0, 20_000) }; }
+        } catch (e) {
+          clientPromise = null; // reconnect on the next call after a failure
+          return { refused: `${ext.name} is unreachable: ${e.message}` };
+        }
+      },
+    };
+  }
+  return servers;
+}
+
 /** The HubSpot adapter: reads for the tool surface, compare-and-set for apply. */
 export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {}) {
   if (!token) throw new Error('HUBSPOT_ACCESS_TOKEN is not set — the CRM adapter cannot start.');

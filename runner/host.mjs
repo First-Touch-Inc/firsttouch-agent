@@ -199,6 +199,12 @@ function runClaude({ prompt, mode, motionId = null, timeoutMs = 45 * 60 * 1000 }
             FT_MCP_TOKEN: process.env.FT_MCP_TOKEN ?? '',
             HUBSPOT_ACCESS_TOKEN: process.env.HUBSPOT_ACCESS_TOKEN ?? '',
             STATE_DIR: process.env.STATE_DIR ?? '',
+            CONFIG_DIR: process.env.CONFIG_DIR ?? '',
+            EXTRA_ADAPTERS_DIR: process.env.EXTRA_ADAPTERS_DIR ?? '',
+            // External tool tokens go to the TOOL SERVER, by the env names
+            // the config declares — the model's own process still gets none.
+            ...Object.fromEntries((cfg.external_tools ?? [])
+              .map((t) => [t.token_env, process.env[t.token_env] ?? ''])),
           },
         },
       },

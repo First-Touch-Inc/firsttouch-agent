@@ -141,6 +141,24 @@ flows: []
 #    name: "<what it does — shown on cards>"
 
 # ---------------------------------------------------------------------------
+# External tools: any MCP server you want the agent to use — Clay, Apollo,
+# Gong, an internal API. Proxied through the agent's tool server, so the
+# model never holds the token and ONLY the tools you list here exist.
+# Tools named like send_*/create_*/delete_* additionally need
+# allow_mutations: true — external tools bypass this agent's approval loop,
+# so acting on the world through one is an explicit choice, not a default.
+# ---------------------------------------------------------------------------
+external_tools: []
+#  - name: clay
+#    url: "https://mcp.clay.com"          # the MCP endpoint
+#    token_env: CLAY_MCP_TOKEN            # the ENV VAR NAME — never the token
+#    allow: [search_people, enrich_person]
+#  - name: gong
+#    url: "https://mcp.gong.io"
+#    token_env: GONG_MCP_TOKEN
+#    allow: [list_calls, get_transcript]
+
+# ---------------------------------------------------------------------------
 # Chat: the always-on conversational surface, and one-off campaigns.
 # ---------------------------------------------------------------------------
 chat:
