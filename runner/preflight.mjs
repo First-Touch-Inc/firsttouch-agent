@@ -11,13 +11,13 @@
 // when a scheduled run misbehaves.
 
 import { loadConfig, checkEnvironment, ConfigError, configPath, resolveStateDir } from './lib/config.mjs';
-import { existsSync, accessSync, constants, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, accessSync, constants, mkdirSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
 const offline = argv.includes('--offline');
-const tenant = (() => {
-  const i = argv.indexOf('--tenant');
-  return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : (process.env.TENANT || 'tenant');
+const name = (() => {
+  const i = argv.indexOf('--config');
+  return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : (process.env.AGENT_CONFIG || 'agent');
 })();
 
 const GREEN = '\x1b[32m', RED = '\x1b[31m', YELLOW = '\x1b[33m', DIM = '\x1b[2m', RESET = '\x1b[0m';
@@ -28,41 +28,36 @@ const fail = (m, d) => console.log(`  ${RED}FAIL${RESET}  ${m}${d ? `  ${DIM}${d
 let fatals = 0;
 let warnings = 0;
 
-console.log(`\nPreflight — tenant "${tenant}"\n`);
+console.log(`\nPreflight — config "${name}"\n`);
 
 // --- 1. config ---------------------------------------------------------------
 console.log('Configuration');
 let cfg = null;
 try {
-  cfg = loadConfig(tenant);
-  pass(`config/${tenant}.yaml is valid`, cfg.client.name);
+  cfg = loadConfig(name);
+  pass(`config/${name}.yaml is valid`, cfg.client.name);
 } catch (e) {
   if (!(e instanceof ConfigError)) throw e;
-  fail(`config/${tenant}.yaml`, configPath(tenant));
+  fail(`config/${name}.yaml`, configPath(name));
   for (const p of e.problems) console.log(`        ${RED}·${RESET} ${p}`);
   fatals++;
 }
 
 if (cfg) {
-  const enabled = cfg.buckets.filter((b) => b.enabled);
-  pass(`${enabled.length} bucket(s) enabled`, enabled.map((b) => `${b.id}(p${b.priority}/cap${b.daily_cap})`).join(' '));
+  const enabled = cfg.__meta.enabledMotions;
+  pass(`${enabled.length} motion(s) enabled`, enabled.map((m) => `${m.id}[${m.kind}]`).join(' '));
 
   if (cfg.run_mode === 'daily') {
-    warn('run_mode is "daily"', `cap ${cfg.caps.max_per_day}/day. Start on "supervised" until you trust the drafts.`);
+    warn('run_mode is "daily"', `limits: ${cfg.limits.per_day}/day, ${cfg.limits.per_week}/week. Start on "supervised" until you trust the drafts.`);
     warnings++;
   } else {
-    pass('run_mode is "supervised"', `cap ${cfg.__meta.effectiveCap}/run`);
+    pass('run_mode is "supervised"', 'outbound capped small per run until you switch to daily');
   }
 
-  const cold = enabled.filter((b) => b.play === 'cold-outbound');
-  const warm = enabled.filter((b) => b.play !== 'cold-outbound');
-  if (cold.length && !warm.length) {
-    warn('only cold buckets are enabled', 'Warm signals convert far better. Enable a warm bucket first.');
-    warnings++;
-  }
-  if (cold.some((b) => warm.some((w) => w.priority >= b.priority))) {
-    warn('a cold bucket outranks a warm one', 'Cold outbound should have the highest priority number, so it runs last.');
-    warnings++;
+  // Per-owner channels are the routing standard; a missing one fails config
+  // validation, so here just show the map for a human sanity check.
+  for (const o of cfg.approval_routing.owners) {
+    pass(`owner ${o.id} → ${o.slack_channel}`, `sends as ${o.provider_user_id}`);
   }
 
   // The voice pack is the single biggest lever on draft quality.
@@ -84,14 +79,9 @@ if (cfg) {
   }
   for (const p of plays.problems) { warn('extra_plays', p); warnings++; }
 
-  // The feedback loop is invisible until you look, so say where it stands.
-  const lp = cfg.__meta.lessonsPath;
-  if (lp && existsSync(lp)) {
-    const lines = readFileSync(lp, 'utf8').split(String.fromCharCode(10)).filter((l) => l.trim().startsWith('-')).length;
-    pass(`feedback memory: ${lines} lesson(s)`, cfg.state.lessons);
-  } else {
-    pass('feedback memory ready', `${cfg.state.lessons} — written after the first approvals come back`);
-  }
+  // Lessons live in the ledger database, host-written only, distilled from
+  // your edits and deny reasons. Nothing to configure; say so.
+  pass('feedback memory', 'lessons live in the ledger — distilled automatically from edits and deny reasons');
 
   // State must be writable, or dedupe silently stops working.
   const stateDir = resolveStateDir();
