@@ -324,6 +324,11 @@ approval_routing:
       provider_user_id: "<OUTREACH_PLATFORM_USER_ID>"   # who the message sends AS
       crm_owner_id: "<CRM_OWNER_ID>"                    # optional; used to match history
       slack_channel: "#pipeline-approvals"
+      # Their Slack user ID (Uxxxxxxxx). Only needed if you use Slack approval
+      # buttons — it is how a click is checked against the person the message
+      # would send as. Without it, cards for this owner can still be read in
+      # Slack but must be approved in the queue.
+      slack_user_id: ""
       match: default
 
     # - id: teammate
@@ -331,7 +336,15 @@ approval_routing:
     #   provider_user_id: "<OUTREACH_PLATFORM_USER_ID>"
     #   crm_owner_id: "<CRM_OWNER_ID>"
     #   slack_channel: "<THEIR_APPROVAL_CHANNEL>"
+    #   slack_user_id: "<U01234ABCDE>"
     #   match: prior_account_history
+
+  # Slack IDs of people who may approve a card that is NOT theirs — a manager
+  # covering while someone is out. Deliberately explicit and named: approving
+  # someone else's outreach sends it from their account, under their name, and
+  # the enrollment's owner cannot be changed afterwards. Empty means nobody,
+  # which is the right default.
+  approval_overrides: []
 
 # -----------------------------------------------------------------------------
 # The shape of every sequence.

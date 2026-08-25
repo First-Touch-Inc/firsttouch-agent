@@ -73,6 +73,29 @@ The send guard applies to both, unchanged. An empty `chat.allowed_users` means
 **nobody** — the process refuses to start rather than answering anyone who finds
 the channel, and preflight rejects the config before that.
 
+### Approval buttons
+
+Socket Mode delivers button clicks on the same outbound connection, which is why
+this repo can have real Approve/Skip buttons with no public URL. Three things
+make a click safe to act on:
+
+- **The clicker is authenticated by Slack**, not asserted in a payload, so
+  `chat.allowed_users` is a real check.
+- **Only the owner may approve their own card.** Approving someone else's
+  outreach sends it from their account under their name, and the enrollment's
+  owner cannot be changed afterwards. `approval_routing.approval_overrides` lets
+  a named manager cover for someone; it is empty by default.
+- **The card's payload is treated as untrusted.** Slack round-trips `value`
+  verbatim, so by the time it returns it is caller-supplied. The task id is used
+  only to ask the platform to act, and the platform is the one that decides
+  whether that task is still actionable — a task already handled in the queue
+  comes back refused, which is the two surfaces agreeing rather than a failure.
+
+The click calls the same API the queue's own UI calls, through host code rather
+than through the model (`runner/lib/mcp-client.mjs`). A human already made the
+decision; routing it through a model would add a chance of doing something
+adjacent instead.
+
 The corollary still holds: if you add a port to any file in this repo, you are
 adding the first one. Do that deliberately, and know exactly what is listening.
 

@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { loadConfig, checkEnvironment, ConfigError, ROOT } from './lib/config.mjs';
+import { applyDecision } from './lib/approvals.mjs';
 
 const log = (...a) => console.log(`[chat ${new Date().toISOString()}]`, ...a);
 
@@ -242,6 +243,71 @@ async function handleEvent(ev) {
   }
 }
 
+// --- approval button clicks --------------------------------------------------
+// Socket Mode delivers button clicks on the same outbound connection as events,
+// which is why this repo can have real Approve/Skip buttons without a public
+// URL. The clicking user comes from Slack's authenticated payload, so the
+// ownership check in applyDecision is meaningful.
+
+/** Map a platform user id back to a Slack id, using approval_routing.owners. */
+function ownerSlackIdFor(providerUserId) {
+  const owner = (cfg.approval_routing?.owners || [])
+    .find((o) => o.provider_user_id === providerUserId);
+  return owner?.slack_user_id || null;
+}
+
+async function handleInteraction(payload) {
+  if (payload.type !== 'block_actions') return;
+  const action = (payload.actions || [])[0];
+  if (!action) return;
+  if (action.action_id === 'open_queue') return;              // a link, not a decision
+  if (!['approve', 'skip'].includes(action.action_id)) return;
+
+  const clicker = payload.user?.id;
+  const channel = payload.channel?.id;
+  const ts = payload.message?.ts;
+
+  if (!ALLOWED_USERS.has(clicker)) {
+    log(`ignored click from ${clicker} (not in chat.allowed_users)`);
+    if (payload.response_url) {
+      await fetch(payload.response_url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ response_type: 'ephemeral', text: 'You are not on the approver list for this agent.' }),
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  log(`${clicker} clicked ${action.action_id}`);
+  let line;
+  try {
+    line = await applyDecision({
+      decision: action.action_id,
+      value: action.value,
+      clicker,
+      cfg,
+      ownerSlackIdFor,
+    });
+  } catch (e) {
+    line = `Could not action that: ${e.message}`;
+  }
+
+  // Replace the buttons with the outcome, so the same card cannot be clicked
+  // twice and everyone in the channel can see who decided what.
+  if (channel && ts) {
+    const blocks = (payload.message?.blocks || []).filter((b) => b.type !== 'actions');
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: line }] });
+    await slack('chat.update', { channel, ts, blocks, text: line });
+  } else if (payload.response_url) {
+    await fetch(payload.response_url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ replace_original: false, text: line }),
+    }).catch(() => {});
+  }
+}
+
 // --- Socket Mode -------------------------------------------------------------
 // Outbound only. Slack hands out a short-lived WSS URL; we dial it, ack every
 // envelope, and reconnect when told to. Node's global WebSocket keeps this
@@ -291,6 +357,9 @@ async function run() {
     if (frame.envelope_id) ws.send(JSON.stringify({ envelope_id: frame.envelope_id }));
     if (frame.type === 'events_api') {
       handleEvent(frame.payload?.event || {}).catch((e) => log(`handler error: ${e.message}`));
+    }
+    if (frame.type === 'interactive') {
+      handleInteraction(frame.payload || {}).catch((e) => log(`interaction error: ${e.message}`));
     }
   });
 

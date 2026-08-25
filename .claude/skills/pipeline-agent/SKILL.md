@@ -268,12 +268,26 @@ This comes from `sequence_defaults` and is not negotiable per-contact:
    service in this repo to post to, and this run opens no listener — see
    `docs/security.md`.
 
-   If `approval_channels.slack` is true and a bot token is present, post ONE
-   digest message per run summarising the day, with a link to the queue. That
-   message is **one-way**: it is a notification, not an approval surface, and
-   nothing reads a reply to it. Post once per run, never one card at a time.
-   If Slack is unavailable, the run still succeeded — say the digest did not
-   fire and carry on, because every approval is already safe in the queue.
+   If `approval_channels.slack` is true and a bot token is present, post the
+   day's digest to Slack. Two shapes, and the config decides which:
+
+   - **`chat.enabled: false` (default)** — post ONE summary message with a link
+     to the queue. It is a notification, not an approval surface, and nothing
+     reads a reply to it.
+   - **`chat.enabled: true`** — you may additionally post one approval CARD per
+     plan, with Approve and Skip buttons, built by
+     `runner/lib/approvals.mjs`. Those buttons only work because the chat
+     process holds a Slack socket to receive the click. **Never post buttons
+     when chat is disabled** — a button that does nothing is worse than a link,
+     because someone will click it and believe they approved something.
+
+   A card must carry the plan's `task_ids` and the owner's `provider_user_id`,
+   or the button has nothing to act on and no one to check the click against.
+
+   Either way the platform's queue stays the source of truth: the button calls
+   the same API the queue's own UI calls, so the two cannot disagree. If Slack
+   is unavailable the run still succeeded — say the digest did not fire and
+   carry on, because every approval is already safe in the queue.
 3. Each digest entry carries the draft fields plus:
    - `signal` — the reason, in one human sentence. This is the SIGNAL, never the
      plumbing. "Started as VP Sales six weeks ago" is a signal. "On approve,

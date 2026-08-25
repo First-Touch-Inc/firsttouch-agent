@@ -18,7 +18,7 @@ npm run dry                   # a full run that creates nothing
 
 Read the drafts from `npm run dry`. When you would send them under your own name, schedule it — [Railway](docs/deploy-railway.md), [Docker, Render, Fly, or a VPS](docs/deploy-other.md).
 
-Optionally, `npm run chat` lets you ask it things in Slack — what it drafted today, why it skipped an account, go run one now.
+Optionally, `npm run chat` lets you ask it things in Slack — what it drafted today, why it skipped an account, go run one now — and turns the daily digest into cards you can approve from Slack.
 
 ---
 
@@ -55,7 +55,7 @@ It runs two ways, and they share everything that matters — the same skills, th
 | | |
 |---|---|
 | `npm start` | One scheduled cycle. Wakes, works, exits. This is the cron job. |
-| `npm run chat` | Long-running. Answers questions in Slack over Socket Mode, and can kick off a run. Reads and drafts; never sends, never writes CRM, never touches the repo. |
+| `npm run chat` | Long-running. Answers questions in Slack over Socket Mode, and receives **Approve / Skip button clicks** on the same connection. Reads and drafts; never sends, never writes CRM, never touches the repo. |
 
 The runner is ~200 lines that loads config, checks credentials, and hands off to a headless [Claude Code](https://claude.com/claude-code) session. That is the only supported harness, and deliberately so: the approval gate is a Claude Code pre-tool hook, and a plain model loop has no point at which anything but the model can say no. [docs/security.md](docs/security.md) explains what was evaluated and why. The judgement lives in [`.claude/skills/pipeline-agent/SKILL.md`](.claude/skills/pipeline-agent/SKILL.md) — plain Markdown, version controlled, yours to edit.
 
