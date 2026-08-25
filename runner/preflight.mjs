@@ -205,4 +205,5 @@ if (warnings) {
 } else {
   console.log(`${GREEN}Ready.${RESET}`);
 }
-console.log(`\nNext:  npm run dry      ${DIM}# a full run that creates nothing${RESET}\n`);
+console.log(`\nNext:  set DRY_RUN=1 and start the host to research + draft without sending${RESET}
+`);

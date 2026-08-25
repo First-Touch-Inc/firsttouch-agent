@@ -33,8 +33,10 @@ on this software.
 
 ## The approval gate
 
-**Every message this agent composes stops in a human queue.** Someone reads it
-and clicks approve before it reaches anyone. No configuration flag changes that.
+**Every message this agent composes stops for a human to approve.** It surfaces
+as an interactive card in Slack, routed to the channel of the person it would send
+as, and someone reads it and clicks approve before it reaches anyone. No
+configuration flag changes that.
 
 There is one deliberate exception, and you should understand it before you enable
 it. If you list a flow under `flows:` in your config, the agent may enrol a
@@ -61,8 +63,9 @@ That is not a default. It is enforced in three places:
 2. **The runner's tool allowlist** — `--allowedTools` grants the outreach and CRM
    MCP servers, file reads and writes, and web search. `Bash` is denied three
    times over. There is no sending tool in the list.
-3. **The outreach platform's own task queue**, which is the source of truth for
-   what actually goes out.
+3. **Approval itself happens in Slack** — interactive cards routed to each
+   owner's channel — and the outreach platform only records the action a human
+   already approved, which is the source of truth for what actually goes out.
 
 ### Why it is not optional
 
@@ -118,7 +121,7 @@ six months of sender reputation is gone.
 
 ### Why warm beats volume, concretely
 
-The buckets in `config/tenant.yaml` are worked in warmth order, and cold outbound
+The motions in `config/agent.yaml` are worked in warmth order, and cold outbound
 is deliberately last with the highest `priority` number. That ordering is not
 sentiment:
 
@@ -137,25 +140,23 @@ sentiment:
   requests and messages are the metered actions, and the account that gets
   restricted belongs to a person on your team.
 
-The reason gate in the `target-accounts` bucket is the mechanism that keeps cold
+The reason gate in the outbound motion is the mechanism that keeps cold
 outbound honest: no researched, dated, sourced reason means no draft, even if
 that means the day ends short. **A short day beats a manufactured one.** Do not
 delete those rules to hit a number — the number is a target, never a quota.
 
 ### The limits block
 
-`limits` in `config/tenant.yaml` is separate from `caps` on purpose. `caps` is
-how much work the agent does; `limits` is how hard it leans on any one channel.
-The shipped defaults are deliberately conservative:
+`limits` in `config/agent.yaml` is how hard the agent leans on outreach overall —
+the enforced volume caps, applied in code against the ledger. The shipped defaults
+are deliberately conservative:
 
 | Limit | Shipped default |
 |---|---|
-| `limits.email.max_per_day` | 20 |
-| `limits.social.max_connection_requests_per_day` | 10 |
-| `limits.social.max_connection_requests_per_week` | 40 |
-| `limits.social.max_messages_per_day` | 15 |
-| `limits.max_contacts_per_company_per_quarter` | 3 |
-| `limits.max_touches_per_contact_per_quarter` | 6 |
+| `limits.per_day` | 25 |
+| `limits.per_week` | 100 |
+| `limits.per_contact_per_quarter` | 2 |
+| `limits.per_company_per_quarter` | 4 |
 
 The last two matter more than people expect. Contacting eight people at one
 company in a month reads to a buying committee as a spray, and they *do* compare
@@ -303,7 +304,7 @@ just a regulator. France sits at the permissive end via its regulator's
 legitimate-interest position. The Netherlands, Ireland, Italy, Spain, Austria
 and the Nordics all differ again.
 
-**This document deliberately does not tell you which bucket your market is in.**
+**This document deliberately does not tell you which category your market is in.**
 Restating national implementing law accurately is a moving target — the texts
 are amended, regulator guidance is revised, and a confident sentence here that
 turns out to be a year stale is worse than no sentence, because you would rely
@@ -407,7 +408,7 @@ published guidance. Treat both as in scope.
 
 ## LinkedIn and platform automation rules
 
-Read this before you enable any social bucket.
+Read this before you enable social outreach in any motion.
 
 **The terms are not ambiguous.** LinkedIn's User Agreement § 8.2 prohibits, among
 other things:
@@ -475,14 +476,14 @@ Four places, and you are responsible for all of them:
 
 | Location | What it holds | Tracked by git? |
 |---|---|---|
-| `state/ledger.jsonl` | One line per person worked: identity key (LinkedIn URL or email), company, bucket, run id, and why they were selected. | No — `state/` is gitignored |
-| `state/runs/*.json` | Full run reports: per-bucket candidate counts, skip reasons, and in a dry run **the complete text of every draft** — names, roles, researched facts, message bodies. | No |
+| `state/ledger.db` | One row per person worked: identity key (LinkedIn URL or email), company, motion, run id, and why they were selected. In a dry run the work items also carry **the complete text of every draft** — names, roles, researched facts, message bodies. | No — `state/` is gitignored |
 | `do-not-contact.txt` | Email addresses, domains and profile URLs of people who asked not to be contacted. | No |
 | Your CRM and outreach platform | The actual contact records, enrollments and sent messages. | Not this repo's storage |
+| The Slack run digest | The summary posted after each run: per-motion candidate counts and skip reasons. Names and message bodies stay in the ledger, but the digest still lands in your Slack workspace. | Not this repo's storage |
 
-The run reports are the richest and the most easily overlooked. A dry-run report
-is effectively a small dossier on each person, and it is the file people are most
-likely to paste into a ticket or a Slack thread. Do not.
+The ledger is the richest and the most easily overlooked. A dry-run ledger holds
+effectively a small dossier on each person, and its work items are what people are
+most likely to paste into a ticket or a Slack thread. Do not.
 
 Note that `do-not-contact.txt` deliberately lives **outside** `state/`, so that
 clearing run state cannot resurrect someone who asked you to stop. That also
@@ -510,23 +511,29 @@ gets re-added by the next CRM sweep and a suppressed one does not.
    happen before the next scheduled run. **Add, never remove.**
 
 2. **Mark them suppressed in your CRM and outreach platform**, and cancel any
-   live enrollment or queued action. The `suppression` list in
-   `config/tenant.yaml` checks for disqualified, bounced, unsubscribed and
-   previously-cancelled rows, so a correctly-marked record stays out on its own.
+   live enrollment or queued action. The `suppression` sources in
+   `config/agent.yaml` — the `do-not-contact.txt` file, `excluded_domains`, and
+   your CRM `customer_signal` — are seeded into the ledger and enforced in code,
+   so a correctly-marked record stays out on its own.
 
-3. **For an erasure request specifically, remove them from the local files too:**
+3. **For an erasure request specifically, remove them from the local state too:**
 
    ```bash
    # Find every mention first — never delete blind.
-   grep -rin "someone@example.com" state/ do-not-contact.txt
+   grep -rin "someone@example.com" do-not-contact.txt
 
-   # Remove their ledger lines (keep a backup until you have verified the result).
-   cp state/ledger.jsonl state/ledger.jsonl.bak
-   grep -iv "someone@example.com" state/ledger.jsonl > state/ledger.tmp \
-     && mv state/ledger.tmp state/ledger.jsonl
+   # The ledger is a SQLite database keyed on an identity graph. Locate the
+   # subject by its alias, then back up before deleting anything.
+   cp state/ledger.db state/ledger.db.bak
+   sqlite3 state/ledger.db \
+     "SELECT subject_id FROM subject_aliases WHERE alias_value LIKE '%someone@example.com%';"
 
-   # Run reports need editing rather than line-deletion — they are JSON.
-   grep -ril "someone@example.com" state/runs/
+   # Remove that subject's rows (work items carry the draft text; touches carry
+   # the contact history). Delete the alias last.
+   sqlite3 state/ledger.db \
+     "DELETE FROM work_items WHERE subject_id = 'THE_SUBJECT_ID';
+      DELETE FROM touches    WHERE subject_id = 'THE_SUBJECT_ID';
+      DELETE FROM subject_aliases WHERE alias_value LIKE '%someone@example.com%';"
    ```
 
    **Keep them in `do-not-contact.txt`.** This is the one apparent contradiction
@@ -544,22 +551,21 @@ gets re-added by the next CRM sweep and a suppressed one does not.
 ### Retention
 
 The repo sets no retention policy, deletes nothing automatically, and will keep
-run reports forever. That is a decision you have to make, not a default you can
+the ledger forever. That is a decision you have to make, not a default you can
 inherit.
 
 A defensible starting point:
 
-- **Run reports** — keep 90 days. They are a QA and costing dataset, and their
-  value decays fast. Rotate them:
-
-  ```bash
-  find state/runs -name '*.json' -mtime +90 -delete
-  ```
-
-- **The ledger** — keep at least as long as `dedupe.rework_cooldown_days`
-  (default 30) plus your longest `limits.*_per_quarter` window, or dedupe and the
-  per-quarter caps stop working. In practice that means about 12 months. Trimming
-  it below the cooldown window silently re-enables double-contacting.
+- **Run digests** — these are posted to Slack rather than written to a file here,
+  so their lifetime is whatever your Slack workspace enforces. Set a message-
+  retention policy on the digest and approvals channels; a digest is a small
+  summary, but it still lands in Slack.
+- **The ledger** — this is where the detailed per-person records live, including
+  the draft text in a dry run, so it is both the QA dataset and the sensitive
+  one. Keep it at least as long as `dedupe.rework_cooldown_days` (default 90) plus
+  your longest `limits.*_per_quarter` window, or dedupe and the per-quarter caps
+  stop working. In practice that means about 12 months. Trimming it below the
+  cooldown window silently re-enables double-contacting.
 - **`do-not-contact.txt`** — indefinitely. See above.
 
 Whatever you choose, write it down and automate it. A retention policy that
@@ -573,7 +579,7 @@ to tell them, in most regimes, and it is the obligation people most often miss
 because there is no obvious moment where it comes up.
 
 The practical answer is `sender_identity.privacy_notice_url` in
-`config/tenant.yaml`: a real page that says what data you hold, where you got it,
+`config/agent.yaml`: a real page that says what data you hold, where you got it,
 what you use it for, and how to object. Link it in the message. It costs you
 nothing and it is the difference between a defensible position and an
 indefensible one.
@@ -586,7 +592,7 @@ sub-processors in your compliance story: you need a lawful basis for the
 disclosure, a data-processing agreement with each, and they belong on whatever
 sub-processor list you publish. Both keys are optional — if you cannot account
 for a provider, leave it unset and the run skips that signal and says so in the
-report.
+run digest.
 
 
 
@@ -598,18 +604,18 @@ Work through this before the first live run. Not after.
 
 - [ ] `npm run preflight` is green, or the only remaining items are warnings you
       have consciously accepted.
-- [ ] `run_mode: supervised`, with `caps.supervised_run_cap` small enough that
+- [ ] `run_mode: supervised`, with each motion's `daily_cap` small enough that
       you will genuinely read every draft.
 - [ ] `providers.crm.customer_signal` names a **real** property from your CRM, and
       you have verified it actually identifies customers. Getting this wrong
       means prospecting people who already pay you.
-- [ ] Every enabled `crm.list` bucket has a real list id, and you have opened
+- [ ] Every enabled `crm.list` source has a real list id, and you have opened
       that list and looked at who is in it.
 - [ ] `approval_routing.owners[].provider_user_id` is set for every owner, and
       you have confirmed each id is the person you think it is.
 - [ ] `excluded_domains` covers your own domains, your customers, your partners
       and your competitors.
-- [ ] The reason-gate rules on the `target-accounts` bucket are intact.
+- [ ] The reason-gate rules on the outbound motion are intact.
 
 ### Compliance
 
@@ -625,8 +631,8 @@ Work through this before the first live run. Not after.
 - [ ] You have decided which jurisdictions you will contact, and you know which
       of the sections above apply. If that includes the EU, the UK or Canada, you
       have taken advice rather than relying on this document.
-- [ ] You have written down a retention period for `state/runs/` and the ledger,
-      and automated it.
+- [ ] You have written down a retention period for the ledger (and for your Slack
+      digest channels), and automated it.
 - [ ] You have a documented lawful basis if you are contacting anyone in the
       EU/UK, and an LIA on file if you are relying on legitimate interests.
 - [ ] Every enrichment provider you have enabled has a data-processing agreement
@@ -642,20 +648,20 @@ Work through this before the first live run. Not after.
 
 ### Operational
 
-- [ ] You have run `npm run dry` and **read the drafts**, and would send each one
+- [ ] You have run `DRY_RUN=1` and **read the drafts**, and would send each one
       under your own name.
 - [ ] The person whose account sends these has personally read a sample and
       agreed. Do not volunteer a colleague's identity for this.
 - [ ] `state/` is on durable storage with an absolute `STATE_DIR`, and you have
-      verified the `report=` path in the run logs points there.
+      verified that `state/ledger.db` is actually being created and written there.
 - [ ] The send guard (`.claude/hooks/guard-send.mjs`) and `.claude/settings.json`
       are unmodified. If you changed them, you know exactly what you changed and
       why.
 - [ ] CRM write scopes are **not** granted, and `CRM_WRITES_ENABLED` is unset —
       unless you deliberately need logging and understand that HubSpot has no
       scope narrower than full contact write.
-- [ ] Someone owns the approval queue daily and knows that bulk-approving without
-      reading defeats the entire design.
+- [ ] Someone owns the Slack approval cards daily and knows that bulk-approving
+      without reading defeats the entire design.
 - [ ] Someone owns replies. A reply that sits unanswered for a week is worse than
       never having sent the message.
 - [ ] You know how to stop it: remove the cron schedule, or set `DRY_RUN=1`.
