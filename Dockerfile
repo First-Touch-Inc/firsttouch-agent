@@ -1,17 +1,23 @@
-# One image, one job: run the daily cycle once and exit.
+# One image, one long-running process: the host.
 #
-# There is no server here and no port. The agent reaches out to your CRM and
-# your outreach platform; nothing reaches in. That is deliberate — see
-# docs/security.md — and it is why this image needs no healthcheck, no
-# reverse proxy, and no inbound firewall rule.
+# There is no server here and no port. The host dials OUT — to Slack over
+# Socket Mode, to your CRM and your outreach platform; nothing reaches in.
+# That is why this image needs no reverse proxy and no inbound firewall rule.
 #
 # Build:  docker build -t pipeline-agent .
-# Run:    docker run --rm --env-file .env -v pipeline-state:/data pipeline-agent
+# Run:    docker run -d --restart unless-stopped --env-file .env \
+#           -v pipeline-data:/data pipeline-agent
+#
+# THE TRUST BOUNDARY, ON DISK
+#   /app   — the engine, the guard, the tool server. Owned by ROOT, read-only
+#            to the runtime user. The agent can rewrite its plays and voice
+#            (which live under /data), but it cannot touch the code that
+#            enforces its rules. This split is the enforcement, not a comment.
+#   /data  — the writable world: config, plays, voice pack, the ledger.
 
 FROM node:22-slim
 
-# git is needed because the agent runtime shells out to it for repo context.
-# ca-certificates for outbound TLS. Nothing else.
+# ca-certificates for outbound TLS. git for the agent runtime's repo context.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -19,22 +25,24 @@ RUN apt-get update \
 WORKDIR /app
 
 # Install dependencies first so a code change does not bust the dependency
-# layer. `npm ci` requires package-lock.json to be in sync with package.json —
-# if the build fails here, run `npm install` locally and commit the lockfile.
+# layer. `npm ci` requires package-lock.json to be in sync with package.json.
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
 COPY . .
 
-# State lives on a mounted volume. Without one, the dedupe ledger resets on
-# every deploy and the same people get contacted twice — so the default points
-# at /data and the deploy docs insist on mounting it.
+# State and tenant files live on a mounted volume. Without one, the dedupe
+# ledger resets on every deploy and the same people get contacted twice.
 ENV STATE_DIR=/data/state \
+    CONFIG_DIR=/data/config \
     NODE_ENV=production
 VOLUME ["/data"]
 
-# Run as the unprivileged user that the node image already provides.
-RUN mkdir -p /data && chown -R node:node /data /app
+# The runtime user owns ONLY /data. /app stays root-owned and read-only to it:
+# a `chown -R node /app` here would hand the agent's own user the ability to
+# rewrite the guard — flagged as a ship-blocker in three independent design
+# reviews, and the single most load-bearing line in this file.
+RUN mkdir -p /data && chown -R node:node /data
 USER node
 
-CMD ["node", "runner/run-daily.mjs"]
+CMD ["node", "runner/host.mjs"]

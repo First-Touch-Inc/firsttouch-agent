@@ -89,6 +89,29 @@ function allow() {
   process.exit(0);
 }
 
+// --- 0. Unknown MCP servers --------------------------------------------------
+// The architecture has exactly ONE model-facing MCP server: the agent tool
+// server (mcp__agent__*), which holds the credentials and enforces every rule
+// in code. Any other MCP server reaching the model means the session was
+// wired differently than designed — deny it wholesale rather than trying to
+// out-guess an unknown tool surface. Legacy deployments that intentionally
+// attach raw provider servers can name them in GUARD_MCP_SERVERS
+// (comma-separated); the fine-grained rules below then still apply to them.
+const ALLOWED_MCP_SERVERS = new Set(
+  (process.env.GUARD_MCP_SERVERS || 'agent').split(',').map((s) => s.trim()).filter(Boolean),
+);
+{
+  const m = toolName.match(/^mcp__([a-z0-9-]+)__/i);
+  if (m && !ALLOWED_MCP_SERVERS.has(m[1])) {
+    deny(
+      `Blocked by the send guard: "${toolName}" belongs to MCP server "${m[1]}", which is not ` +
+      `one this agent is designed to talk to (permitted: ${[...ALLOWED_MCP_SERVERS].join(', ')}). ` +
+      `All platform access goes through the agent tool server, which enforces suppression, ` +
+      `caps, ownership and approvals in code.`,
+    );
+  }
+}
+
 // --- 1. Tools that deliver a message immediately -----------------------------
 // These bypass the approval queue by definition. There is no configuration that
 // turns this off, and that is the point.

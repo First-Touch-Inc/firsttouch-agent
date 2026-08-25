@@ -1,18 +1,17 @@
 {
   "name": "pipeline-agent",
   "version": "0.1.0",
-  "description": "Self-hostable, approval-first pipeline agent. Researches your warm signals and target accounts daily, drafts personalized outreach, and routes every draft to a human for approval.",
+  "description": "Self-hostable, approval-first pipeline agent: one Slack agent running outbound, inbound triage, deal follow-up and post-close CS motions — every send behind a human approval.",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "preflight": "node runner/preflight.mjs",
-    "start": "node runner/run-daily.mjs",
-    "dry": "node runner/run-daily.mjs --dry",
-    "test": "node --test",
-    "chat": "node runner/chat.mjs"
+    "host": "node runner/host.mjs",
+    "start": "node runner/host.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.241",

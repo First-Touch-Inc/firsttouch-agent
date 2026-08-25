@@ -21,7 +21,7 @@
 import process from 'node:process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { loadConfig, ROOT } from '../lib/config.mjs';
+import { loadConfig, configDir, ROOT } from '../lib/config.mjs';
 import { openLedger } from '../lib/ledger.mjs';
 import { ToolCore, ToolError, ENRICHMENT_KINDS, MODES } from '../lib/tools-core.mjs';
 import { firsttouchProvider, hubspotProvider } from '../lib/providers.mjs';
@@ -211,7 +211,9 @@ const providers = {
     });
   },
   writeWorkspaceFile(relPath, content) {
-    const target = join(ROOT, 'config', relPath); // plays/… and voice-pack.md live under config/
+    // plays/… and voice-pack.md live in the tenant dir — the writable volume
+    // in a container, never the read-only engine tree.
+    const target = join(configDir(), relPath);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, content);
   },

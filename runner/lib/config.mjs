@@ -40,8 +40,26 @@ export const MOTION_KINDS = ['outbound', 'inbound', 'deal_followup', 'cs_postclo
 // fully when it parses; this stops the obviously wrong thing at load time.
 const CRON_SHAPE = /^\S+ \S+ \S+ \S+ \S+$/;
 
+/** Where tenant-owned files live. In the container this is /data/config (the
+ *  writable volume); the repo's own config/ is the dev default. The split is
+ *  load-bearing: the engine ships read-only, the tenant's world is writable —
+ *  a read-only config dir would silently break set_config and onboarding. */
+export function configDir() {
+  const dir = process.env.CONFIG_DIR || join(ROOT, 'config');
+  return isAbsolute(dir) ? dir : resolve(ROOT, dir);
+}
+
+/** Resolve a config-declared path: absolute stays; a "config/…" prefix means
+ *  the tenant dir (wherever that is); anything else is repo-relative. */
+export function resolveTenantPath(p) {
+  if (isBlank(p)) return null;
+  if (isAbsolute(p)) return p;
+  if (/^config[\/]/.test(p)) return join(configDir(), p.replace(/^config[\/]/, ''));
+  return join(ROOT, p);
+}
+
 export function configPath(name = process.env.AGENT_CONFIG || 'agent') {
-  return join(ROOT, 'config', `${name}.yaml`);
+  return join(configDir(), `${name}.yaml`);
 }
 
 /**
@@ -78,9 +96,7 @@ export function loadConfig(name = process.env.AGENT_CONFIG || 'agent') {
     name,
     path,
     stateDir: resolveStateDir(),
-    voicePackPath: cfg.voice_pack
-      ? (isAbsolute(cfg.voice_pack) ? cfg.voice_pack : join(ROOT, cfg.voice_pack))
-      : null,
+    voicePackPath: resolveTenantPath(cfg.voice_pack),
     plays: resolvePlays(cfg),
     ledgerPath: isAbsolute(cfg.state.ledger)
       ? cfg.state.ledger
@@ -419,7 +435,7 @@ export function resolvePlays(cfg) {
   const raw = cfg.extra_plays;
   if (isBlank(raw)) return out;
 
-  const p = isAbsolute(raw) ? raw : join(ROOT, raw);
+  const p = resolveTenantPath(raw);
 
   // Pointing at the shipped catalogue is the default and means "no extras".
   if (resolve(p) === resolve(shipped)) return out;

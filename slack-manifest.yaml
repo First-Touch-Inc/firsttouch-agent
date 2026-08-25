@@ -1,0 +1,47 @@
+# The Slack app, as one pasteable manifest.
+#
+#   1. https://api.slack.com/apps → Create New App → "From a manifest"
+#   2. Pick your workspace, paste this whole file, Create.
+#   3. Install App → Install to Workspace → copy the Bot Token (xoxb-…).
+#   4. Basic Information → App-Level Tokens → Generate Token and Scopes →
+#      add `connections:write` → copy the App Token (xapp-…).
+#      [The manifest cannot mint this one — it is the single manual token step.]
+#
+# Socket Mode means the agent DIALS OUT to Slack: no request URL, no public
+# endpoint, no inbound firewall rule. The interactivity block needs no URL for
+# the same reason.
+
+display_information:
+  name: Pipeline Agent
+  description: Works your pipeline daily and asks before anything sends.
+  background_color: "#22633F"
+
+features:
+  bot_user:
+    display_name: pipeline-agent
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write           # post cards, digests, replies
+      - chat:write.customize # per-message persona name/avatar (motion badges)
+      - im:history           # DMs: onboarding, claim code, chat
+      - im:read
+      - im:write
+      - app_mentions:read    # @pipeline-agent in channels
+      - channels:read        # validate the per-owner approvals channels
+      - groups:read
+      - reactions:write      # the 👀 acknowledgement
+      - users:read           # names for owner binding confirmations
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

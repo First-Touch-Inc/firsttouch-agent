@@ -13,12 +13,15 @@ import { dirname } from 'node:path';
 
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', '.claude', 'hooks', 'guard-send.mjs');
 
-/** Run the hook against a raw stdin payload. */
-function decideRaw(input, { dryRun = false } = {}) {
+/** Run the hook against a raw stdin payload.
+ *  The fine-grained rules below are exercised with GUARD_MCP_SERVERS set to
+ *  the legacy raw-provider servers; the DEFAULT behaviour (only the agent
+ *  tool server is permitted at all) has its own section at the end. */
+function decideRaw(input, { dryRun = false, servers = 'outreach,crm,agent' } = {}) {
   const res = spawnSync(process.execPath, [HOOK], {
     input,
     encoding: 'utf8',
-    env: { ...process.env, DRY_RUN: dryRun ? '1' : '0' },
+    env: { ...process.env, DRY_RUN: dryRun ? '1' : '0', GUARD_MCP_SERVERS: servers },
   });
   assert.equal(res.status, 0, 'the hook must always exit 0 so it never breaks the run');
   if (!res.stdout.trim()) return null;
@@ -193,4 +196,35 @@ test('flow enrolment does NOT relax the dynamic-action gate', () => {
     assert.ok(denied(decide('mcp__outreach__add_dynamic_action', { ownerId: 'u1' })));
     assert.ok(denied(decide('mcp__outreach__send_email', {})));
   });
+});
+
+// --- the default: exactly one MCP server exists -------------------------------
+// The v1 architecture gives the model ONE server — the agent tool server,
+// which holds the credentials and enforces every rule in code. By default the
+// guard denies any other MCP server wholesale: if a raw provider server ever
+// reaches a session, the wiring is wrong and no fine-grained rule should be
+// trusted to out-guess an unknown tool surface.
+
+test('by default, any non-agent MCP server is denied wholesale — even reads', () => {
+  for (const tool of [
+    'mcp__outreach__list_enrollments',        // a read the legacy rules allow
+    'mcp__outreach__add_dynamic_action',
+    'mcp__crm__crm_search_contacts',
+    'mcp__gmail__send_message',
+    'mcp__anything__whatever',
+  ]) {
+    const d = decide(tool, { isHumanApprovalRequired: true, ownerId: 'u1' }, { servers: 'agent' });
+    assert.ok(denied(d), `${tool} must be denied under the default single-server architecture`);
+    assert.match(d.permissionDecisionReason, /agent tool server/);
+  }
+});
+
+test('the agent tool server itself passes through to the normal flow', () => {
+  assert.equal(decide('mcp__agent__propose_outreach', {}, { servers: 'agent' }), null);
+  assert.equal(decide('mcp__agent__set_config', {}, { servers: 'agent' }), null);
+});
+
+test('built-in tools are unaffected by the server allowlist', () => {
+  assert.equal(decide('Read', { file_path: 'x.md' }, { servers: 'agent' }), null);
+  assert.equal(decide('WebSearch', {}, { servers: 'agent' }), null);
 });
