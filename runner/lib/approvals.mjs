@@ -81,9 +81,21 @@ export async function applyDecision({ decision, value, clicker, cfg, ownerSlackI
 
   // Rule 1: the owner approves their own outreach. An override list exists for
   // managers, but it is opt-in and named, never implicit.
+  // FAIL CLOSED. This check previously read `if (ownerSlackId && ...)`, which
+  // meant an unresolvable owner skipped the check entirely — a card with no
+  // owner recorded, or an owner with no slack_user_id configured, could be
+  // approved by anyone on the allowlist. That is precisely the failure this
+  // check exists to prevent, so not knowing the owner must refuse, never allow.
   const overrides = new Set(cfg.approval_routing?.approval_overrides || []);
-  const ownerSlackId = ownerProviderId ? ownerSlackIdFor(ownerProviderId) : null;
-  if (ownerSlackId && ownerSlackId !== clicker && !overrides.has(clicker)) {
+
+  if (!ownerProviderId) {
+    return 'That card has no owner recorded, so I cannot tell whose account it would send from. Action it in the queue, and check why the plan was created without an owner.';
+  }
+  const ownerSlackId = ownerSlackIdFor(ownerProviderId);
+  if (!ownerSlackId) {
+    return `That card's owner has no \`slack_user_id\` in \`approval_routing.owners\`, so I cannot verify you are them. Add it to the config, or action it in the queue.`;
+  }
+  if (ownerSlackId !== clicker && !overrides.has(clicker)) {
     return `That one sends as <@${ownerSlackId}>, so it is theirs to approve. Approving someone else's outreach sends it from their account under their name.`;
   }
 

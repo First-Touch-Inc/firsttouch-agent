@@ -66,7 +66,7 @@ The runner is ~200 lines that loads config, checks credentials, and hands off to
 | **Model access** | An Anthropic API key, or an existing Claude subscription via `claude setup-token`. Subscription limits are not built for continuous automation — check your plan before scheduling it. |
 | **Outreach platform** | [FirstTouch](https://www.firsttouch.com) — executes touches and owns the approval queue |
 | **CRM** | HubSpot private-app token |
-| **Slack** *(optional)* | A bot token with `chat:write` for the daily digest |
+| **Slack** *(optional)* | A bot token with `chat:write` for the digest. Chat also needs `reactions:write`, `app_mentions:read` and history scopes — see [configuration](docs/configuration.md). |
 
 Other providers need an adapter — see [docs/providers.md](docs/providers.md). The config declares which you use, so an unimplemented one fails at preflight with a clear message instead of half-working.
 

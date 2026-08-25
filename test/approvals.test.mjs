@@ -135,3 +135,45 @@ test('missing platform credentials fail loudly, not silently', async () => {
     if (saved !== undefined) process.env.FT_MCP_TOKEN = saved;
   }
 });
+
+// --- fail-closed ownership ---------------------------------------------------
+// Found by an independent audit: the check used to read `if (ownerSlackId && …)`,
+// so an owner that could not be resolved skipped the check entirely and anyone
+// on the allowlist could approve someone else's outreach. Not knowing the owner
+// must refuse, never allow.
+
+test('a card with no owner recorded is refused, not allowed', async () => {
+  const line = await applyDecision({
+    decision: 'approve',
+    value: JSON.stringify({ t: 'task_123' }),        // no `o`
+    clicker: 'U_SOMEONE_ELSE',
+    cfg: CFG,
+    ownerSlackIdFor,
+  });
+  assert.match(line, /no owner recorded/i);
+  assert.doesNotMatch(line, /FT_MCP_TOKEN/, 'it must refuse before reaching the platform');
+});
+
+test('an owner with no slack_user_id is refused, not allowed', async () => {
+  const line = await applyDecision({
+    decision: 'approve',
+    value: JSON.stringify({ t: 'task_123', o: 'usr_not_in_config' }),
+    clicker: 'U_SOMEONE_ELSE',
+    cfg: CFG,
+    ownerSlackIdFor,
+  });
+  assert.match(line, /slack_user_id/);
+  assert.doesNotMatch(line, /FT_MCP_TOKEN/, 'it must refuse before reaching the platform');
+});
+
+test('the owner themselves still gets through', async () => {
+  const line = await applyDecision({
+    decision: 'approve',
+    value: JSON.stringify({ t: 'task_123', o: 'usr_ada' }),
+    clicker: 'U_ADA',
+    cfg: CFG,
+    ownerSlackIdFor,
+  });
+  // Passes ownership, then stops on credentials — which proves it proceeded.
+  assert.match(line, /FT_MCP_TOKEN/);
+});

@@ -294,7 +294,7 @@ environment. That matters under cron; see
 |---|---|---|
 | `ANTHROPIC_MODEL` | unset | Model for the run. Leave unset for the default. |
 | `FT_MCP_URL` | `https://mcp.firsttouch.ai` | Overrides the MCP endpoint. `providers.outreach.mcp_url` in the config takes precedence over this. |
-| `SLACK_BOT_TOKEN` | unset | `xoxb-…`. Needs only `chat:write`. Invite the bot to your approvals channel. Absent = the digest is skipped and approvals still land in the platform queue. |
+| `SLACK_BOT_TOKEN` | unset | `xoxb-…`. Digest only: `chat:write`. For `npm run chat` also grant `reactions:write`, `app_mentions:read`, and history for where it listens (`im:history`, `channels:history`, `groups:history`). Absent = the digest is skipped and approvals still land in the platform queue. |
 | `SLACK_CHANNEL` | from config | Overrides `client.digest.slack_channel`. |
 | `SERPER_API_KEY` | unset | Web search for company signals (funding, hiring, news). Absent = that signal is skipped and the run says so. |
 | `SCRAPECREATORS_API_KEY` | unset | Ad-library signal. Absent = skipped. |
