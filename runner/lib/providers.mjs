@@ -116,6 +116,95 @@ export async function firsttouchProvider({ token = process.env.FT_MCP_TOKEN } = 
   };
 }
 
+/**
+ * The dashboard reader: any account-health API a tenant configures for the
+ * cs_postclose motion. IDENTITY, NOT LIVENESS: before the first read of a
+ * base URL (and again after any failure) the response of the base itself must
+ * contain the configured identity string — a stale or wrong host answering
+ * 200 ok is refused, which is the exact incident class (a moved service kept
+ * answering ok:true and silently swallowed work).
+ */
+export function dashboardReader({ fetchImpl = fetch } = {}) {
+  const verified = new Set();
+
+  async function assertIdentity(baseUrl, identity) {
+    if (verified.has(baseUrl)) return;
+    if (!identity) throw new Error('dashboard.identity is not configured — refusing to trust liveness alone');
+    const res = await fetchImpl(baseUrl, { signal: AbortSignal.timeout(15_000) });
+    const body = await res.text();
+    if (!res.ok || !body.includes(identity)) {
+      throw new Error(
+        `dashboard at ${baseUrl} did not present the expected identity string — ` +
+        `refusing to read from it. A service that merely ANSWERS is not the service ` +
+        `you configured.`,
+      );
+    }
+    verified.add(baseUrl);
+  }
+
+  return {
+    async read({ baseUrl, identity, path }) {
+      try {
+        await assertIdentity(baseUrl, identity);
+        const res = await fetchImpl(`${baseUrl.replace(/\/$/, '')}${path}`, {
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!res.ok) return { refused: `dashboard returned ${res.status} for ${path}` };
+        const text = await res.text();
+        try { return JSON.parse(text); } catch { return { raw: text.slice(0, 20_000) }; }
+      } catch (e) {
+        verified.delete(baseUrl); // re-verify identity after any failure
+        return { refused: e.message };
+      }
+    },
+  };
+}
+
+/**
+ * Private adapter loading — the sanctioned door for deployment-specific
+ * integrations (an internal dashboard, a transcript source, another CRM),
+ * WITHOUT forking the engine. The overlay image sets EXTRA_ADAPTERS_DIR to a
+ * directory it COPYed into the image; that directory's index.mjs exports
+ * `register({ providers, cfg })` and may extend or replace providers.
+ *
+ * The one rule, enforced here: the adapters dir must NOT live on the
+ * writable volume. Code under CONFIG_DIR or STATE_DIR would be writable by
+ * the agent's own user, and loading it into a credential-holding process
+ * would quietly reopen the self-modification hole the image/volume split
+ * exists to close. Image-only, or refused.
+ */
+export function validateAdaptersDir(dir, {
+  configDir = process.env.CONFIG_DIR,
+  stateDir = process.env.STATE_DIR,
+} = {}) {
+  if (!dir) return { ok: false, reason: 'no dir given' };
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+  const d = norm(dir);
+  for (const forbidden of [configDir, stateDir].filter(Boolean)) {
+    if (d.startsWith(norm(forbidden))) {
+      return {
+        ok: false,
+        reason: `EXTRA_ADAPTERS_DIR (${dir}) is inside the writable volume (${forbidden}). ` +
+          `Adapter code must be baked into the image, where the agent's user cannot ` +
+          `write it — refusing to load code the agent could have authored.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+export async function loadExtraAdapters(providers, cfg) {
+  const dir = process.env.EXTRA_ADAPTERS_DIR;
+  if (!dir) return providers;
+  const check = validateAdaptersDir(dir);
+  if (!check.ok) throw new Error(check.reason);
+  const mod = await import(new URL(`file://${dir.replace(/\\/g, '/')}/index.mjs`).href);
+  if (typeof mod.register !== 'function') {
+    throw new Error(`${dir}/index.mjs must export register({ providers, cfg })`);
+  }
+  return (await mod.register({ providers, cfg })) ?? providers;
+}
+
 /** The HubSpot adapter: reads for the tool surface, compare-and-set for apply. */
 export function hubspotProvider({ token = process.env.HUBSPOT_ACCESS_TOKEN } = {}) {
   if (!token) throw new Error('HUBSPOT_ACCESS_TOKEN is not set — the CRM adapter cannot start.');

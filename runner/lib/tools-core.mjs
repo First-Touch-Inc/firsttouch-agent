@@ -77,6 +77,8 @@ export class ToolCore {
     list_team_members:        { modes: ['motion', 'chat', 'onboarding'] },
     list_sender_connections:  { modes: ['motion', 'chat', 'onboarding'] },
     list_declared_flows:      { modes: ['motion', 'chat', 'onboarding'] },
+    // the CS dashboard (or any account-health API a tenant configures)
+    dashboard_read:           { modes: ['motion', 'chat'] },
     // paid reads, credit-capped
     start_enrichment:         { modes: ['motion', 'chat'] },
     // staging (everything a human then approves)
@@ -175,6 +177,28 @@ export class ToolCore {
   _list_team_members()           { return this.p.ft.listTeamMembers(); }
   _list_sender_connections(args) { return this.p.ft.listSenderConnections(args); }
   _list_declared_flows()         { return { flows: this.cfg.flows ?? [] }; }
+
+  // -------------------------------------------------------------------------
+  // The dashboard read: the cs_postclose data source (or any account API).
+  // The model supplies only a PATH — the base URL and the identity string
+  // come from config, so injected text can never point this at another host,
+  // and a stale service answering ok:true fails the identity assertion in
+  // the provider rather than being believed.
+  // -------------------------------------------------------------------------
+  _dashboard_read({ path }) {
+    const motion = this.mode === 'motion'
+      ? this.cfg.motions.find((m) => m.id === this.motionId)
+      : this.cfg.motions.find((m) => m.kind === 'cs_postclose' && m.enabled);
+    const dash = motion?.dashboard;
+    if (!dash?.base_url) {
+      return { refused: 'no dashboard is configured for this context (motions[].dashboard)' };
+    }
+    const p = String(path ?? '');
+    if (!p.startsWith('/') || p.includes('://') || p.includes('..')) {
+      return { refused: 'path must be an absolute path on the configured dashboard ("/api/…") — no full URLs, no traversal' };
+    }
+    return this.p.dash.read({ baseUrl: dash.base_url, identity: dash.identity, path: p });
+  }
 
   // -------------------------------------------------------------------------
   // Paid reads: the closed enrichment enum

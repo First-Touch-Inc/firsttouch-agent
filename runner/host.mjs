@@ -36,7 +36,7 @@ import { applyWorkItem, applyCampaignTick, expireDueItems } from './lib/apply.mj
 import { handleBlockAction, handleViewSubmission, renderCard, ownerSlackIdFor } from './lib/decide.mjs';
 import { buildCard, digestBlocks } from './lib/cards.mjs';
 import { dueSchedules } from './lib/schedule.mjs';
-import { firsttouchProvider, hubspotProvider } from './lib/providers.mjs';
+import { firsttouchProvider, hubspotProvider, loadExtraAdapters } from './lib/providers.mjs';
 import { distillLessons } from './lib/distill.mjs';
 
 const log = (...a) => console.log(`[host ${new Date().toISOString()}]`, ...a);
@@ -140,8 +140,14 @@ function writeOperator(userId) {
 }
 
 // --- providers for the apply path -------------------------------------------
-const platform = process.env.FT_MCP_TOKEN ? await firsttouchProvider() : null;
-const crm = process.env.HUBSPOT_ACCESS_TOKEN ? hubspotProvider() : null;
+// Extra adapters (an overlay's private integrations) may extend these too —
+// they are baked into the image, never loaded from the writable volume.
+const applyProviders = await loadExtraAdapters({
+  platform: process.env.FT_MCP_TOKEN ? await firsttouchProvider() : null,
+  crm: process.env.HUBSPOT_ACCESS_TOKEN ? hubspotProvider() : null,
+}, cfg);
+const platform = applyProviders.platform;
+const crm = applyProviders.crm;
 
 // --- model spawns ------------------------------------------------------------
 // One at a time: subscription 5-hour windows are the scarce resource, and a

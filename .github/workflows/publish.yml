@@ -1,0 +1,52 @@
+# Publish the engine image to GHCR on every version tag.
+#
+# This is what makes the overlay pattern real: a deployment-specific image
+# (ours included) is `FROM ghcr.io/first-touch-inc/firsttouch-pipeline-agent:vX.Y.Z`
+# plus its own config and private adapters — never a fork of this repo.
+#
+# Tags are pinned versions on purpose. An overlay that tracks :latest gets
+# surprise engine changes; one that pins upgrades deliberately, reading the
+# release notes, the way we tell customers to.
+
+name: publish
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image must never ship with failing tests — the tests are the
+      # enforcement claims in the README.
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm test
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

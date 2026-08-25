@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { loadConfig, configDir, ROOT } from '../lib/config.mjs';
 import { openLedger } from '../lib/ledger.mjs';
 import { ToolCore, ToolError, ENRICHMENT_KINDS, MODES } from '../lib/tools-core.mjs';
-import { firsttouchProvider, hubspotProvider } from '../lib/providers.mjs';
+import { firsttouchProvider, hubspotProvider, dashboardReader, loadExtraAdapters } from '../lib/providers.mjs';
 
 console.log = console.error;
 console.info = console.error;
@@ -87,6 +87,14 @@ const TOOL_SCHEMAS = {
   list_declared_flows: {
     description: 'The flows this agent may enrol contacts into. The list IS the permission.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  dashboard_read: {
+    description: 'Read a path from the configured account dashboard (cs_postclose). Absolute path only — the base URL and identity come from config.',
+    inputSchema: {
+      type: 'object', required: ['path'],
+      properties: { path: { type: 'string', description: 'e.g. "/api/at-risk"' } },
+      additionalProperties: false,
+    },
   },
   start_enrichment: {
     description: `Paid enrichment. kind must be one of: ${ENRICHMENT_KINDS.join(', ')}. Credit-capped per run — qualify with free checks first.`,
@@ -197,13 +205,21 @@ if (!MODES.includes(mode)) {
 const cfg = loadConfig();
 const ledger = openLedger(cfg.__meta.ledgerPath);
 
-const providers = {
-  ft: await firsttouchProvider(),
+// In a dry run nothing is created, so a missing platform token degrades to
+// refusals the model reports as skips — matching checkEnvironment, which
+// makes FT_MCP_TOKEN non-fatal for dry runs. Anywhere else it is fatal.
+const ftRefusal = { refused: 'outreach platform not connected (dry run without FT_MCP_TOKEN)' };
+let providers = {
+  ft: process.env.FT_MCP_TOKEN ? await firsttouchProvider()
+    : process.env.DRY_RUN === '1'
+      ? new Proxy({}, { get: () => () => ftRefusal })
+      : (() => { throw new Error('FT_MCP_TOKEN is not set and this is not a dry run.'); })(),
   crm: process.env.HUBSPOT_ACCESS_TOKEN ? hubspotProvider() : {
     searchContacts: () => ({ refused: 'no CRM connected' }),
     getList: () => ({ refused: 'no CRM connected' }),
     listDeals: () => ({ refused: 'no CRM connected' }),
   },
+  dash: dashboardReader(),
   writeConfig(candidate) {
     // Serialise back to YAML via js-yaml (already a dependency of config).
     return import('js-yaml').then(({ dump }) => {
@@ -218,6 +234,10 @@ const providers = {
     writeFileSync(target, content);
   },
 };
+
+// Deployment-specific adapters, baked into the IMAGE by an overlay build —
+// never loaded from the writable volume (validateAdaptersDir enforces that).
+providers = await loadExtraAdapters(providers, cfg);
 
 const core = new ToolCore({
   cfg, ledger, mode,
