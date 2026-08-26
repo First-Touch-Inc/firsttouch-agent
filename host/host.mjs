@@ -561,7 +561,7 @@ function cardBlocks(card) {
       text:
         `*${name}*${p.title ? ` · ${p.title}` : ''}${p.company ? ` @ *${p.company}*` : ''}\n` +
         (card.research ? `_${trunc(card.research, 200)}_\n` : '') +
-        `${shape}${(card.edited || card.edited_copy) ? '  ·  ✏️ edited' : ''}${teaser ? `   >  ${teaser}` : ''}`,
+        `${shape}${card.edited_copy ? '  ·  ✏️ edited' : ''}${teaser ? `   >  ${teaser}` : ''}`,
     },
     accessory: { type: 'image', image_url: avatar, alt_text: name },
   };
@@ -672,7 +672,6 @@ async function settleApproval(card, decision, user, editedCopy = null) {
       (card.task_ids.length
         ? `Update the staged action(s) so the copy matches exactly (edit_task_action), verify the write with list_user_tasks/preview_task, and only then complete task${card.task_ids.length === 1 ? '' : 's'} ${card.task_ids.join(', ')} — the approval is recorded, so completing is permitted. `
         : '') +
-      (card.removed_note ? `They also DROPPED these steps — cancel/remove those staged actions: ${card.removed_note}. ` : '') +
       `An edit is the strongest feedback there is: work out the rule behind their diff and record it. Reply with one short confirmation line.\n` +
       `---FINAL COPY START---\n${editedCopy}\n---FINAL COPY END---`
     : decision === 'approved'
@@ -926,44 +925,30 @@ async function handleEvent(ev) {
 
 // --- button clicks -----------------------------------------------------------
 async function handleInteraction(payload) {
-  // Modal submit ("Apply", ported from the hub's review_draft_modal): saves
-  // the human's edits and dropped steps onto the card — which stays PENDING
-  // and re-renders as "✏️ edited". Approving is still its own click on the
-  // card; edit and approve are separate acts, exactly like the hub.
+  // Modal submit ("Apply", hub semantics): approve WITH the human's edits in
+  // one act. Every step ships — the FirstTouch MCP cannot approve a subset,
+  // so there is no removal path; Deny + redraft covers "less". The wake-up
+  // carries the edited sequence for verbatim write-back before completion.
   if (payload?.type === 'view_submission' && payload.view?.callback_id === 'approval_edit') {
     const card = approvals[payload.view.private_metadata];
     if (!card || card.status !== 'pending') return;
     const user = await whoIs(payload.user?.id);
     const vals = payload.view.state?.values || {};
+    let editedCopy;
     if (card.steps?.length) {
-      const kept = new Set((vals.steps?.value?.selected_options || []).map((o) => o.value));
-      const removedLabels = [];
-      const edited = [];
-      card.steps.forEach((s, i) => {
-        if (!kept.has(String(i))) { removedLabels.push(s.label || `step ${i + 1}`); return; }
-        edited.push({
-          ...s,
-          copy: vals[`step_${i}`]?.value?.value ?? s.copy,
-          ...(s.subject ? { subject: vals[`subj_${i}`]?.value?.value ?? s.subject } : {}),
-        });
-      });
-      if (!edited.length) return; // dropping every step is a Deny, not an edit
-      card.steps = edited;
-      card.removed_note = removedLabels.length ? removedLabels.join(', ') : '';
+      card.steps = card.steps.map((s, i) => ({
+        ...s,
+        copy: vals[`step_${i}`]?.value?.value ?? s.copy,
+        ...(s.subject ? { subject: vals[`subj_${i}`]?.value?.value ?? s.subject } : {}),
+      }));
+      editedCopy = card.steps.map((s, i) =>
+        `--- STEP ${i + 1}${s.label ? ` — ${s.label}` : ''} ---\n${s.subject ? `Subject: ${s.subject}\n` : ''}${s.copy || ''}`).join('\n\n');
     } else {
-      const value = vals.copy?.copy_input?.value || '';
-      if (!value.trim()) return;
-      card.copy = value.slice(0, 2900);
+      editedCopy = (vals.copy?.copy_input?.value || '').trim();
+      if (!editedCopy) return;
     }
-    card.edited = true;
-    card.edited_by = { id: user.id, name: user.name };
-    saveApprovals();
-    await slack('chat.update', {
-      channel: card.channel, ts: card.ts,
-      text: `Approval needed (edited): ${card.title}`,
-      blocks: cardBlocks(card),
-    });
-    log(`approval ${card.id} edited by ${user.name}${card.removed_note ? ` (dropped: ${card.removed_note})` : ''}`);
+    log(`approval ${card.id} approved WITH EDITS by ${user.name}`);
+    await settleApproval(card, 'approved', user, editedCopy);
     return;
   }
   if (payload?.type !== 'block_actions') return;
@@ -1018,22 +1003,12 @@ async function handleInteraction(payload) {
           label: { type: 'plain_text', text: 'Final copy' },
           element: { type: 'plain_text_input', action_id: 'copy_input', multiline: true, ...(card.copy ? { initial_value: card.copy } : {}) },
         }]),
-      ...(card.steps?.length ? [
-        { type: 'divider' },
-        {
-          type: 'input', block_id: 'steps',
-          label: { type: 'plain_text', text: 'Steps to send' },
-          element: {
-            type: 'checkboxes', action_id: 'value',
-            options: card.steps.map((s, i) => ({ value: String(i), text: { type: 'plain_text', text: stepLabel(s, i) } })),
-            initial_options: card.steps.map((s, i) => ({ value: String(i), text: { type: 'plain_text', text: stepLabel(s, i) } })),
-          },
-        },
-        {
-          type: 'context',
-          elements: [{ type: 'mrkdwn', text: 'Uncheck a step to drop it from the sequence. *Apply* saves your edits; *Approve* on the card sends what remains. Deny is on the card.' }],
-        },
-      ] : []),
+      {
+        type: 'context',
+        // No step-dropping: the FirstTouch MCP cannot approve a subset of a
+        // sequence. Edit copy, or Deny and let the agent redraft.
+        elements: [{ type: 'mrkdwn', text: '*Apply* approves and sends the sequence with your edits. Deny is on the card.' }],
+      },
     ];
     const view = {
       type: 'modal', callback_id: 'approval_edit', private_metadata: card.id,
@@ -1058,15 +1033,8 @@ async function handleInteraction(payload) {
     return;
   }
   const decision = action.action_id.endsWith('approve') ? 'approved' : 'denied';
-  log(`approval ${card.id} ${decision} by ${user.name}${card.edited ? ' (with prior edits)' : ''}`);
-  // An approve after Apply carries the human's edited sequence into the wake
-  // prompt: the agent writes it back verbatim before completing.
-  const editedCopy = decision === 'approved' && card.edited
-    ? (card.steps?.length
-      ? card.steps.map((s, i) => `--- STEP ${i + 1}${s.label ? ` — ${s.label}` : ''} ---\n${s.subject ? `Subject: ${s.subject}\n` : ''}${s.copy || ''}`).join('\n\n')
-      : card.copy || null)
-    : null;
-  await settleApproval(card, decision, user, editedCopy);
+  log(`approval ${card.id} ${decision} by ${user.name}`);
+  await settleApproval(card, decision, user);
 }
 
 // --- schedules ---------------------------------------------------------------
