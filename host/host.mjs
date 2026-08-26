@@ -199,11 +199,25 @@ async function whoIs(userId) {
     id: userId,
     name: r.user?.profile?.real_name || r.user?.real_name || r.user?.name || userId,
     email: r.user?.profile?.email || null,
-  } : { id: userId, name: userId, email: null };
-  userCache.set(userId, u);
+  } : { id: userId, name: userId, email: null, lookupError: r.error || 'unknown' };
+  if (r.ok) {
+    userCache.set(userId, u);
+  } else {
+    // Never cache a failure: a fixed scope or reinstall should recover on the
+    // very next message, not after a host restart.
+    log(`users.info failed for ${JSON.stringify(userId)}: ${u.lookupError}`);
+  }
   return u;
 }
-const speakerTag = (u) => `[Message from ${u.name}${u.email ? ` <${u.email}>` : ''} (Slack ${u.id})]`;
+// The tag is how the agent knows whose outreach it is. When the lookup fails,
+// say WHY in the tag — the agent can then tell the operator something
+// actionable instead of treating a bare user id as a name.
+const speakerTag = (u) => u.lookupError
+  ? `[Message from Slack user ${u.id} — profile lookup failed (${u.lookupError}). ` +
+    `Identity unresolved: do not stage outreach owned by this person yet; tell them the host ` +
+    `could not resolve their Slack profile (error "${u.lookupError}") so the operator can fix ` +
+    `the app's users:read / users:read.email access.]`
+  : `[Message from ${u.name}${u.email ? ` <${u.email}>` : ''} (Slack ${u.id})]`;
 
 /**
  * One Slack message that narrates the turn while it runs, then becomes the
