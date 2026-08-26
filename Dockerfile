@@ -25,7 +25,7 @@
 FROM node:22-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep gosu \
+  && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep gosu unzip \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --uid 10001 --no-create-home --home-dir /data/home --shell /bin/bash agent
 
@@ -36,6 +36,18 @@ RUN npm ci --omit=dev
 ENV WORK_DIR=/data/agent \
     HOME=/data/home \
     DISABLE_AUTOUPDATER=1
+
+# The skill packs — the motions the agent knows out of the box. All four role
+# packs are baked into .claude/skills/ (shared skills are identical across
+# packs), and .claude/ re-syncs to the work dir on every boot, so pack updates
+# ship with the image. Before the source COPY so this layer caches across
+# code-only deploys.
+RUN git clone --depth 1 https://github.com/First-Touch-Inc/firsttouch-agent-skill-packs /tmp/skill-packs \
+  && mkdir -p /tmp/skill-packs/unpacked .claude/skills \
+  && for z in /tmp/skill-packs/packs/*.zip; do unzip -oq "$z" -d /tmp/skill-packs/unpacked; done \
+  && cp -r /tmp/skill-packs/unpacked/skills/. .claude/skills/ \
+  && rm -rf /tmp/skill-packs \
+  && ls .claude/skills
 
 COPY . .
 

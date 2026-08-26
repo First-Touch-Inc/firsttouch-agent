@@ -121,9 +121,10 @@ its memory is files in this repo, and all of it is yours to read and edit.
 
 **Skill packs** — ready-made playbooks for common motions (founder-led
 outbound, warm-engager follow-up, stalled-deal reactivation, inbound
-speed-to-lead) live at
+speed-to-lead, website-visitor follow-up, customer referrals) live at
 [firsttouch-agent-skill-packs](https://github.com/First-Touch-Inc/firsttouch-agent-skill-packs).
-Unzip a pack into `.claude/skills/` and the agent picks it up.
+The Docker image ships all of them pre-installed; running from a checkout,
+unzip a pack into `.claude/skills/` and the agent picks it up.
 
 ## The approval guarantee
 
