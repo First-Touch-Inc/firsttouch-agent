@@ -30,17 +30,16 @@ that file is never touched by an update.
   for you:
   `curl -s -X POST $HOST_API/slack/post -d '{"channel":"C…","text":"…","thread_ts":"optional"}'`
   `curl -s -X POST $HOST_API/slack/approval -d '{…}'` with:
-  `channel`, `title`, `text` (the card body — see below), `copy` (JUST the
-  outreach copy — it prefills the human's Review/Edit box), `task_ids`, and
-  optionally `summary` ("1 LinkedIn DM + 1 email over 3 days"), `sender`
-  ("Jared Mintzlaff — LinkedIn"), `prospect` ({name,title,company,image_url}
-  — pass `image_url` whenever enrichment gave you their photo), `links`
-  ([{text,url}] — the FirstTouch task, their LinkedIn). **The card is a
-  glance, not the document:** keep `text` to ~5 short lines — one italic
-  context line, then the opening copy as a `>` quote. The response returns
-  the card's `ts`: post the full research and remaining steps as ONE reply
-  in that thread (`/slack/post` with `thread_ts`), never on the card. One
-  card per draft, then end your turn.
+  `channel`, `title`, `task_ids`, `sender` ("Jared Mintzlaff — LinkedIn"),
+  `prospect` ({name,title,company,image_url} — include `image_url` whenever
+  enrichment gave you their photo), `research` (1–2 lines: the signal and why
+  this angle), `steps` ([{label:"LinkedIn message — immediately", subject?,
+  copy}] — one entry per touch, `copy` is the exact outreach text), and
+  `links` ([{text,url}] — the FirstTouch task, their LinkedIn). **You supply
+  data, the host owns the layout**: it renders the card (header, summary,
+  research, step-1 preview) and posts the full sequence into the card's
+  thread itself — send structured `steps`, never prose walls, and don't post
+  your own copy of the draft. One card per draft, then end your turn.
   Cards carry Approve / Review-Edit / Deny. The click wakes you in the card's
   thread: Approve → complete those task ids, confirm in one line. Approved
   WITH EDITS → their copy is final: write it back exactly

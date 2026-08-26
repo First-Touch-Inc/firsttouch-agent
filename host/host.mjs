@@ -473,19 +473,41 @@ const saveApprovals = () => writeState('approvals.json', approvals);
 async function postApprovalCard({
   id, channel, title, text,
   copy = '', summary = '', sender = '', prospect = null, links = [], task_ids = [],
+  research = '', steps = [],
 }) {
-  // The card is a glance; the thread is the document. A tight cap keeps even
-  // a verbose draft from turning the card into a scroll — the full text
-  // always lands in the thread below it.
+  // Two rendering paths. With `steps[]` (the preferred contract) the layout
+  // is ENTIRELY the host's: computed summary, italic research line, quoted
+  // step-1 preview, and the full sequence posted by the host into the
+  // thread — identical shape on every card, because the agent hands over
+  // data, never prose. Legacy `text` still renders as a capped body.
+  const structured = steps.length > 0;
   const CARD_BODY_MAX = 1000;
-  const body = toSlackMrkdwn(String(text));
-  const clipped = body.length > CARD_BODY_MAX;
+  const legacyBody = toSlackMrkdwn(String(text));
+  const clipped = !structured && legacyBody.length > CARD_BODY_MAX;
   // Header: the prospect, when the agent says who it is — name · title @
   // company with their photo — falling back to the plain title.
   const headline = prospect?.name
     ? `*${prospect.name}*${prospect.title ? ` · ${prospect.title}` : ''}${prospect.company ? ` @ ${prospect.company}` : ''}\n${title}`
     : `*${title}*`;
-  const contextBits = [sender && `Sender: ${sender}`, summary].filter(Boolean).join('   ·   ');
+  const shortLabel = (s, i) => String(s.label || `step ${i + 1}`).split(/[—(:]/)[0].trim() || `step ${i + 1}`;
+  const computedSummary = structured
+    ? `${steps.length} touch${steps.length === 1 ? '' : 'es'}: ${steps.map(shortLabel).join(' → ')}`.slice(0, 150)
+    : '';
+  const contextBits = [sender && `Sender: ${sender}`, summary || computedSummary].filter(Boolean).join('   ·   ');
+  const cardQuote = (s) => toSlackMrkdwn(String(s)).split('\n').map((l) => `> ${l}`).join('\n');
+  let bodyText;
+  if (structured) {
+    const s0 = steps[0];
+    const previewFull = String(s0.copy || '');
+    bodyText = [
+      research ? `_${toSlackMrkdwn(String(research)).slice(0, 400)}_` : '',
+      `*${toSlackMrkdwn(String(s0.label || 'Step 1'))}*${s0.subject ? `\nSubject: ${toSlackMrkdwn(String(s0.subject))}` : ''}`,
+      cardQuote(previewFull.slice(0, 280)) + (previewFull.length > 280 ? '\n> …' : ''),
+      steps.length > 1 ? `_All ${steps.length} steps in full in this thread._` : '_Full copy in this thread._',
+    ].filter(Boolean).join('\n').slice(0, 2900);
+  } else {
+    bodyText = legacyBody.slice(0, CARD_BODY_MAX) + (clipped ? '\n_…full draft in this thread._' : '');
+  }
   const linkLine = (Array.isArray(links) ? links : []).filter((l) => l?.url)
     .map((l) => `<${l.url}|${toSlackMrkdwn(String(l.text || 'link'))}>`).join('  ·  ');
   const footer = [linkLine, task_ids.length ? `FirstTouch task${task_ids.length === 1 ? '' : 's'}: ${task_ids.join(', ')}` : '']
@@ -499,7 +521,7 @@ async function postApprovalCard({
         ...(prospect?.image_url ? { accessory: { type: 'image', image_url: prospect.image_url, alt_text: prospect?.name || 'prospect' } } : {}),
       },
       ...(contextBits ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: contextBits.slice(0, 2900) }] }] : []),
-      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, CARD_BODY_MAX) + (clipped ? '\n_…full draft in this thread._' : '') } },
+      { type: 'section', text: { type: 'mrkdwn', text: bodyText } },
       {
         type: 'actions',
         elements: [
@@ -512,11 +534,23 @@ async function postApprovalCard({
     ],
   });
   if (!res.ok) return { error: `Slack refused the card: ${res.error}` };
-  // Nothing is lost to the card's size cap: the full draft rides in the thread.
-  if (clipped) await say(channel, body, res.ts);
+  // The thread carries the document — host-posted, so it is always complete
+  // and always the same shape. (say() converts Markdown, so raw goes in.)
+  if (structured) {
+    const rawQuote = (s) => String(s).split('\n').map((l) => `> ${l}`).join('\n');
+    const detail = steps.map((s, i) =>
+      `**Step ${i + 1} — ${s.label || ''}**${s.subject ? `\nSubject: ${s.subject}` : ''}\n${rawQuote(s.copy || '')}`,
+    ).join('\n\n');
+    await say(channel, (research ? `_${String(research)}_\n\n` : '') + detail, res.ts);
+  } else if (clipped) {
+    await say(channel, legacyBody, res.ts);
+  }
+  const editCopy = String(copy || (structured
+    ? steps.map((s, i) => `--- STEP ${i + 1}${s.label ? ` — ${s.label}` : ''} ---\n${s.copy || ''}`).join('\n\n')
+    : '')).slice(0, 2900);
   approvals[id] = {
     id, channel, ts: res.ts, title, task_ids,
-    copy: String(copy || '').slice(0, 2900),
+    copy: editCopy,
     status: 'pending', created_at: new Date().toISOString(),
   };
   saveApprovals();
@@ -592,6 +626,17 @@ const api = createServer(async (req, res) => {
         sender: typeof data.sender === 'string' ? data.sender : '',
         prospect: data.prospect && typeof data.prospect === 'object' ? data.prospect : null,
         links: Array.isArray(data.links) ? data.links : [],
+        research: typeof data.research === 'string' ? data.research : '',
+        steps: Array.isArray(data.steps)
+          ? data.steps
+            .filter((s) => s && typeof s === 'object' && typeof s.copy === 'string')
+            .slice(0, 10)
+            .map((s) => ({
+              label: typeof s.label === 'string' ? s.label : '',
+              subject: typeof s.subject === 'string' ? s.subject : '',
+              copy: s.copy,
+            }))
+          : [],
         task_ids: Array.isArray(task_ids) ? task_ids.map(String) : [],
       }));
     }
