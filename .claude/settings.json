@@ -28,6 +28,12 @@
     ]
   },
 
+  "//permissions": [
+    "Read(...) rules govern ALL file-reading tools — Read, Glob and Grep alike.",
+    "Glob(...)/Grep(...) rules are not matched by file permission checks, so",
+    "listing them here does nothing except emit a warning on every spawn, which",
+    "corrupted the CLI's JSON output and surfaced as a wall of stderr in Slack."
+  ],
   "permissions": {
     "deny": [
       "Bash",
@@ -37,19 +43,12 @@
       "WebFetch(domain:localhost)",
       "WebFetch(domain:127.0.0.1)",
       "Read(/proc/**)",
-      "Glob(/proc/**)",
-      "Grep(/proc/**)",
       "Read(/sys/**)",
-      "Glob(/sys/**)",
-      "Grep(/sys/**)",
       "Read(**/.env)",
       "Read(**/.env.*)",
       "Read(**/*-oauth.json)",
       "Read(**/*.db)",
-      "Glob(**/*.db)",
-      "Read(**/.run/**)",
-      "Glob(**/.run/**)",
-      "Grep(**/.run/**)"
+      "Read(**/.run/**)"
     ]
   }
 }

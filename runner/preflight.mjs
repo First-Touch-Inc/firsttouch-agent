@@ -10,7 +10,9 @@
 // Run this after `/setup`, after any config edit, and as the first thing you do
 // when a scheduled run misbehaves.
 
-import { loadConfig, checkEnvironment, ConfigError, configPath, resolveStateDir } from './lib/config.mjs';
+import './lib/env.mjs'; // MUST be first: populates process.env from .env
+import { loadConfig, checkEnvironment, ConfigError, configPath, resolveStateDir, AGENT_MODEL } from './lib/config.mjs';
+import { parseModelOutput } from './lib/model-output.mjs';
 import { existsSync, accessSync, constants, mkdirSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
@@ -38,9 +40,18 @@ try {
   pass(`config/${name}.yaml is valid`, cfg.client.name);
 } catch (e) {
   if (!(e instanceof ConfigError)) throw e;
-  fail(`config/${name}.yaml`, configPath(name));
-  for (const p of e.problems) console.log(`        ${RED}·${RESET} ${p}`);
-  fatals++;
+  // No config at all is the NORMAL first-run state, not a failure: the host
+  // boots in bootstrap mode and the onboarding conversation writes the config.
+  // Reporting it as a blocking problem sent new operators hunting for a file to
+  // hand-write, which is exactly the work the agent exists to do for them.
+  if (!existsSync(configPath(name))) {
+    warn(`no config yet — this is a first run`, `the host will start in bootstrap mode; DM the bot "onboard" and it writes ${configPath(name)}`);
+    warnings++;
+  } else {
+    fail(`config/${name}.yaml`, configPath(name));
+    for (const p of e.problems) console.log(`        ${RED}·${RESET} ${p}`);
+    fatals++;
+  }
 }
 
 if (cfg) {
@@ -102,7 +113,14 @@ if (cfg) {
 
 // --- 2. credentials ----------------------------------------------------------
 console.log('\nCredentials');
-const env = checkEnvironment({ dryRun: false });
+// Mirror the host exactly. A preflight that is stricter than the thing it is
+// previewing reports blocking problems for a setup that would start fine, and
+// one that is looser lets a real send fail at 8am. Both are the same bug.
+const dryRun = process.env.DRY_RUN === '1' || !existsSync(configPath(name));
+if (dryRun) {
+  console.log(`  ${DIM}(nothing can send yet — provider credentials are reported but not fatal)${RESET}`);
+}
+const env = checkEnvironment({ dryRun });
 for (const c of env.checks) {
   if (c.ok) pass(c.key, c.detail);
   else if (c.fatal) { fail(c.key, c.detail); fatals++; }
@@ -191,6 +209,46 @@ if (!offline) {
   } catch {
     fail('claude CLI not found on PATH', 'Run `npm install` in this repo.');
     fatals++;
+  }
+
+  // ...and the CLI being installed is not the same as it being able to AUTHENTICATE.
+  // A present-but-expired CLAUDE_CODE_OAUTH_TOKEN passed every check above and
+  // then failed on the first real turn, in Slack, in front of the operator.
+  // One cheap round trip here is worth that.
+  try {
+    const { spawnSync } = await import('node:child_process');
+    // Checks the PINNED model specifically: an account with a working login but
+    // no access to it would pass a generic auth check and then fail every run.
+    // The prompt goes on stdin for the same reason the host does it — on Windows
+    // an argv prompt is split at the first newline and takes the flags with it.
+    const args = ['-p', '--model', AGENT_MODEL, '--output-format', 'json'];
+    const opts = { input: 'Reply with exactly: PONG', encoding: 'utf8', timeout: 90_000 };
+    const r = process.platform === 'win32'
+      ? spawnSync('cmd', ['/c', 'claude', ...args], { ...opts, windowsHide: true })
+      : spawnSync('claude', args, opts);
+    // Tolerant parsing, not JSON.parse: an attached MCP server can print a
+    // notice to stdout ahead of the envelope ("Client.listTools() called but
+    // server does not advertise tools capability"), which made a perfectly
+    // working model report as unverifiable.
+    const envelope = parseModelOutput(r.stdout);
+    if (envelope && !envelope.is_error) {
+      pass(`model authenticated (${AGENT_MODEL})`, 'a real turn completed');
+    } else if (envelope?.is_error) {
+      fail(`the model could not run (${AGENT_MODEL})`, `${envelope.result || 'unknown error'}\n        `
+        + `If this is an auth error, run \`claude setup-token\` and update CLAUDE_CODE_OAUTH_TOKEN. `
+        + `If the model is unavailable on your plan, set AGENT_MODEL to one you can use.`);
+      fatals++;
+    } else {
+      const why = r.error?.message
+        || (r.signal ? `killed by ${r.signal}` : '')
+        || (r.stderr || '').trim().slice(-200)
+        || `exit ${r.status}, no output`;
+      warn('could not verify model auth', why);
+      warnings++;
+    }
+  } catch (e) {
+    warn('could not verify model auth', e.message);
+    warnings++;
   }
 }
 

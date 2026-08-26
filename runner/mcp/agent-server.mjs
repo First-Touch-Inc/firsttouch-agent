@@ -19,9 +19,9 @@
 // stray log cannot corrupt the protocol stream.
 
 import process from 'node:process';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { loadConfig, configDir, ROOT } from '../lib/config.mjs';
+import { loadConfig, bootstrapConfig, configPath, configDir, ROOT } from '../lib/config.mjs';
 import { openLedger } from '../lib/ledger.mjs';
 import { ToolCore, ToolError, ENRICHMENT_KINDS, MODES } from '../lib/tools-core.mjs';
 import { firsttouchProvider, hubspotProvider, dashboardReader, externalToolProviders, loadExtraAdapters } from '../lib/providers.mjs';
@@ -220,18 +220,28 @@ if (!MODES.includes(mode)) {
   process.exit(2);
 }
 
-const cfg = loadConfig();
+// A first-run onboarding session runs BEFORE any config exists — that session
+// is the thing that writes it. Mirror the host: no file means bootstrap, an
+// existing-but-invalid file still throws.
+const cfg = existsSync(configPath()) ? loadConfig() : bootstrapConfig();
 const ledger = openLedger(cfg.__meta.ledgerPath);
 
-// In a dry run nothing is created, so a missing platform token degrades to
-// refusals the model reports as skips — matching checkEnvironment, which
-// makes FT_MCP_TOKEN non-fatal for dry runs. Anywhere else it is fatal.
-const ftRefusal = { refused: 'outreach platform not connected (dry run without FT_MCP_TOKEN)' };
+// The outreach platform normally reaches the model as an MCP connector on the
+// Claude Code run, in which case this server holds no platform credential and
+// exposes no platform tools — the model calls the connector directly and the
+// send guard polices it.
+//
+// FT_MCP_TOKEN remains supported for a deployment that would rather keep the
+// credential here (a container with no connector, say). When it is set, these
+// host-side tools are mounted and the model uses them instead.
+//
+// What must NOT happen is the middle state: advertising platform tools that
+// answer every call with "not connected". The model dutifully reports each
+// refusal, and an operator's first impression of the product becomes a list of
+// things that are broken.
+const platformViaHost = Boolean(process.env.FT_MCP_TOKEN);
 let providers = {
-  ft: process.env.FT_MCP_TOKEN ? await firsttouchProvider()
-    : process.env.DRY_RUN === '1'
-      ? new Proxy({}, { get: () => () => ftRefusal })
-      : (() => { throw new Error('FT_MCP_TOKEN is not set and this is not a dry run.'); })(),
+  ft: platformViaHost ? await firsttouchProvider() : null,
   crm: process.env.HUBSPOT_ACCESS_TOKEN ? hubspotProvider() : {
     searchContacts: () => ({ refused: 'no CRM connected' }),
     getList: () => ({ refused: 'no CRM connected' }),

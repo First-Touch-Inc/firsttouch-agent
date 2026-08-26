@@ -20,6 +20,14 @@ features:
   bot_user:
     display_name: firsttouch-agent
     always_online: true
+  # The Messages tab is REQUIRED, not cosmetic: the claim code, onboarding and
+  # every chat turn happen in a DM. Without messages_tab_enabled Slack shows
+  # "Sending messages to this app has been turned off" and there is no way in
+  # at all — the app installs into a dead end.
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 
 oauth_config:
   scopes:
@@ -34,6 +42,9 @@ oauth_config:
       - groups:read
       - reactions:write      # the 👀 acknowledgement
       - users:read           # names for owner binding confirmations
+      - files:read           # read screenshots you attach — Slack file URLs are
+                             # private and need this scope; without it Slack
+                             # serves a login page instead of the image
 
 settings:
   event_subscriptions:

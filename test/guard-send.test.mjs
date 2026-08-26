@@ -198,12 +198,10 @@ test('flow enrolment does NOT relax the dynamic-action gate', () => {
   });
 });
 
-// --- the default: exactly one MCP server exists -------------------------------
-// The v1 architecture gives the model ONE server — the agent tool server,
-// which holds the credentials and enforces every rule in code. By default the
-// guard denies any other MCP server wholesale: if a raw provider server ever
-// reaches a session, the wiring is wrong and no fine-grained rule should be
-// trusted to out-guess an unknown tool surface.
+// --- the server allowlist ----------------------------------------------------
+// Only servers the deployment declared may reach the model at all. If an
+// undeclared server appears, the wiring is wrong and no fine-grained rule
+// should be trusted to out-guess an unknown tool surface.
 
 test('by default, any non-agent MCP server is denied wholesale — even reads', () => {
   for (const tool of [
@@ -214,8 +212,8 @@ test('by default, any non-agent MCP server is denied wholesale — even reads', 
     'mcp__anything__whatever',
   ]) {
     const d = decide(tool, { isHumanApprovalRequired: true, ownerId: 'u1' }, { servers: 'agent' });
-    assert.ok(denied(d), `${tool} must be denied under the default single-server architecture`);
-    assert.match(d.permissionDecisionReason, /agent tool server/);
+    assert.ok(denied(d), `${tool} must be denied when only the agent server is declared`);
+    assert.match(d.permissionDecisionReason, /not\s+designed to talk to/i);
   }
 });
 
@@ -227,4 +225,72 @@ test('the agent tool server itself passes through to the normal flow', () => {
 test('built-in tools are unaffected by the server allowlist', () => {
   assert.equal(decide('Read', { file_path: 'x.md' }, { servers: 'agent' }), null);
   assert.equal(decide('WebSearch', {}, { servers: 'agent' }), null);
+});
+
+// --- the platform as an MCP CONNECTOR ----------------------------------------
+// When the outreach platform arrives as a connector on the Claude Code run
+// rather than behind the agent tool server, the model holds its tools directly
+// and this hook becomes the ONLY thing between a draft and a real send.
+//
+// Claude Code sanitises a server name into the tool prefix, replacing invalid
+// characters with underscores: "plugin:founder-pack:firsttouch" becomes
+// `mcp__plugin_founder-pack_firsttouch__…`. Every rule must match that shape.
+
+const FT = 'mcp__plugin_founder-pack_firsttouch__';
+const WITH_FT = { servers: 'agent,plugin_founder-pack_firsttouch' };
+
+test('connector: a read is allowed', () => {
+  assert.equal(decide(`${FT}list_team_members`, {}, WITH_FT), null);
+});
+
+test('connector: a direct send is blocked', () => {
+  const d = decide(`${FT}send_linkedin_unibox_message`, { message: 'hi' }, WITH_FT);
+  assert.ok(denied(d));
+  assert.match(d.permissionDecisionReason, /directly to a person/i);
+});
+
+test('connector: creating an action without the approval flag is blocked', () => {
+  assert.ok(denied(decide(`${FT}add_dynamic_action`, { ownerId: 'u1' }, WITH_FT)));
+});
+
+test('connector: creating an action with approval off is blocked', () => {
+  assert.ok(denied(decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: false, ownerId: 'u1' }, WITH_FT)));
+});
+
+test('connector: an owner-less action is blocked', () => {
+  const d = decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true }, WITH_FT);
+  assert.ok(denied(d));
+  assert.match(d.permissionDecisionReason, /owner/i);
+});
+
+test('connector: a properly gated, owned action is allowed', () => {
+  assert.equal(decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true, ownerId: 'u1' }, WITH_FT), null);
+});
+
+test('connector: authoring or publishing a flow is blocked', () => {
+  withFlows(['flow_ok_1'], () => {
+    assert.ok(denied(decide(`${FT}create_flow_plan`, { name: 'x' }, WITH_FT)));
+    assert.ok(denied(decide(`${FT}manage_flow_publication`, {}, WITH_FT)));
+  });
+});
+
+test('connector: a dry run blocks mutations', () => {
+  const d = decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true, ownerId: 'u1' },
+    { ...WITH_FT, dryRun: true });
+  assert.ok(denied(d));
+  assert.match(d.permissionDecisionReason, /DRY RUN/i);
+});
+
+test('a server name containing UNDERSCORES is still checked — the fail-open bug', () => {
+  // The rule matched `^mcp__([a-z0-9-]+)__`, whose character class excludes the
+  // underscore. Against a sanitised connector prefix the match simply FAILED,
+  // the check fell through to allow, and the guard silently stopped applying to
+  // exactly the servers most worth guarding.
+  const d = decide('mcp__some_other_server__send_message', {}, { servers: 'agent' });
+  assert.ok(denied(d), 'an undeclared server with underscores must still be denied');
+});
+
+test('prefix matching is not fooled by a partial server name', () => {
+  // "agent" must not permit "agentx".
+  assert.ok(denied(decide('mcp__agentx__send_message', {}, { servers: 'agent' })));
 });

@@ -91,17 +91,22 @@ export class ToolCore {
     crm_search_contacts:      { modes: ['motion', 'chat'] },
     crm_get_list:             { modes: ['motion', 'chat'] },
     crm_list_deals:           { modes: ['motion', 'chat'] },
-    list_team_members:        { modes: ['motion', 'chat', 'onboarding'] },
-    list_sender_connections:  { modes: ['motion', 'chat', 'onboarding'] },
+    // Platform reads. `needs: 'ft'` means the tool is only MOUNTED when this
+    // process holds a platform credential. Where the platform arrives as an MCP
+    // connector instead, the model calls it directly and these are absent —
+    // absent, not refusing, because a tool that exists only to say "not
+    // connected" turns a first run into a list of apparent breakages.
+    list_team_members:        { modes: ['motion', 'chat', 'onboarding'], needs: 'ft' },
+    list_sender_connections:  { modes: ['motion', 'chat', 'onboarding'], needs: 'ft' },
     list_declared_flows:      { modes: ['motion', 'chat', 'onboarding'] },
     // source sweeps — the warm signals the motions actually work
-    list_engagers:            { modes: ['motion', 'chat'] },
-    preview_list:             { modes: ['motion', 'chat'] },
-    discover_contacts:        { modes: ['motion', 'chat'] },
+    list_engagers:            { modes: ['motion', 'chat'], needs: 'ft' },
+    preview_list:             { modes: ['motion', 'chat'], needs: 'ft' },
+    discover_contacts:        { modes: ['motion', 'chat'], needs: 'ft' },
     // the CS dashboard (or any account-health API a tenant configures)
     dashboard_read:           { modes: ['motion', 'chat'] },
     // paid reads, credit-capped
-    start_enrichment:         { modes: ['motion', 'chat'] },
+    start_enrichment:         { modes: ['motion', 'chat'], needs: 'ft' },
     // staging (everything a human then approves)
     propose_outreach:         { modes: ['motion', 'chat'] },
     propose_crm_change:       { modes: ['motion', 'chat'] },
@@ -117,10 +122,15 @@ export class ToolCore {
     write_voice_pack:         { modes: ['chat', 'onboarding'] },
   };
 
+  /** True when the provider a tool depends on is actually mounted. */
+  _hasDependency(def) {
+    return !def.needs || Boolean(this.p?.[def.needs]);
+  }
+
   availableTools() {
     return [
       ...Object.entries(ToolCore.TOOLS)
-        .filter(([, def]) => def.modes.includes(this.mode))
+        .filter(([, def]) => def.modes.includes(this.mode) && this._hasDependency(def))
         .map(([name]) => name),
       ...this.externalTools.keys(),
     ];
@@ -142,6 +152,12 @@ export class ToolCore {
       // Belt and braces: the wiring should never have exposed it, but a second
       // check in the dispatcher costs nothing and fails closed.
       throw new ToolError(`tool "${name}" is not available in ${this.mode} sessions`);
+    }
+    if (!this._hasDependency(def)) {
+      // Same belt-and-braces: availableTools already omits it, so reaching here
+      // means the model named a tool it was never offered. Refusing beats
+      // dereferencing a provider that is not mounted.
+      throw new ToolError(`tool "${name}" is not mounted — its provider is not connected in this deployment`);
     }
     const method = `_${name}`;
     if (typeof this[method] !== 'function') throw new ToolError(`tool "${name}" not implemented`);
@@ -566,7 +582,11 @@ function workspaceFilename(filename, ext) {
 }
 
 function stripMeta(cfg) {
-  const { __meta, ...rest } = cfg;
+  // __bootstrap must go too. It is a first-run marker on the in-memory config,
+  // and the config written here is the one loaded forever after — persisting it
+  // would leave every future boot believing it is still un-onboarded, with the
+  // tick loop disabled and nothing ever running.
+  const { __meta, __bootstrap, ...rest } = cfg;
   return rest;
 }
 

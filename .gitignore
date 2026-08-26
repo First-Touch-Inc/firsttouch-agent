@@ -24,6 +24,7 @@ secrets.*
 
 # --- Your tenant configuration (the .example files ARE tracked) -------------
 config/tenant.yaml
+config/agent.yaml
 config/*.local.yaml
 voice-pack.md
 
@@ -52,3 +53,6 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 .venv/
+
+# Scratch file written by the old ft-auth browser flow.
+authorize-firsttouch.html

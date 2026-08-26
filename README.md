@@ -68,13 +68,31 @@ tests (`npm test`, 170 of them):
    Install to workspace → copy the **Bot Token** (`xoxb-…`). Then Basic
    Information → App-Level Tokens → generate one with `connections:write` →
    copy the **App Token** (`xapp-…`).
+
+   The manifest turns on the **Messages tab** and requests **`files:read`**, and
+   both matter: everything you do with this agent happens in a DM, and Slack
+   blocks DMs to an app whose Messages tab is off. `files:read` is what lets it
+   open the screenshots you send — Slack file URLs are private, and without the
+   scope Slack serves a login page instead of the image. If you built the app
+   before these were added, set them under **App Home** and **OAuth &
+   Permissions**, then **Reinstall to Workspace**.
 2. **Model access** — on any machine where you're logged into Claude:
    `claude setup-token` → copy the token. (Or use an Anthropic API key —
-   set exactly one of the two; setting both is a startup error.)
-3. **FirstTouch MCP token** — FirstTouch is connected over MCP, not a REST
-   API: one bearer token (`FT_MCP_TOKEN`) against `https://mcp.firsttouch.ai`,
-   the same MCP you'd add to Claude — grab it from your FirstTouch workspace's
-   MCP settings ([firsttouch.com/mcp](https://firsttouch.com/mcp)).
+   set exactly one of the two; setting both is a startup error.) Sessions run on
+   **Opus 5** unless you set `AGENT_MODEL`: the work is judging whether a signal
+   is a real reason to reach out and writing something a person would reply to,
+   and a weaker model doesn't fail loudly — it just drafts worse.
+3. **FirstTouch** — reached as an **MCP connector on the Claude Code run**, so
+   this process never holds a platform credential:
+   `claude mcp add --transport http firsttouch https://mcp.firsttouch.ai`, then
+   `/mcp` once to authorise. Claude Code owns the OAuth and refreshes it.
+   Set `FT_MCP_SERVER` if your server is registered under a different name.
+   A deployment that would rather keep the credential here can set
+   `FT_MCP_TOKEN` instead, and the platform tools move back onto the tool server.
+
+   Because the model can then call the platform directly, the approval guarantee
+   is enforced by the `PreToolUse` send guard rather than by withholding the
+   capability. See [`.claude/hooks/guard-send.mjs`](.claude/hooks/guard-send.mjs).
 4. **Deploy** — Railway, Fly, Render, or any Docker host:
 
    ```bash
@@ -85,7 +103,10 @@ tests (`npm test`, 170 of them):
    (`cp .env.example .env` and fill it in first. No cron to arrange — the
    host schedules itself. No port to expose — it dials out.)
 5. **Claim it** — the container log prints a claim code. DM the bot that code
-   in Slack; you become the operator.
+   in Slack; you become the operator. (On a first run there is no config yet:
+   the host starts in bootstrap mode — Slack and onboarding only, nothing
+   scheduled and nothing sendable — because the config is what onboarding is
+   for.)
 6. **Say "onboard"** — the agent interviews you: which motions, who sends,
    an approvals channel per sender, your ICP and voice — validating each step
    live and finishing with a supervised dry run. Config it writes passes the

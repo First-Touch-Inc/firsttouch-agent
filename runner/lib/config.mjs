@@ -58,6 +58,17 @@ export function resolveTenantPath(p) {
   return join(ROOT, p);
 }
 
+/**
+ * The model every session runs on.
+ *
+ * Pinned by the engine rather than inherited from whatever `claude` defaults to
+ * on the machine, so a run behaves the same for everyone who clones this repo.
+ * The work is judgement-heavy — whether a signal is a real reason to reach out,
+ * and copy a person would actually reply to — and a weaker model does not fail
+ * loudly, it just drafts worse, which shows up in reply rates weeks later.
+ */
+export const AGENT_MODEL = process.env.AGENT_MODEL || 'claude-opus-5';
+
 export function configPath(name = process.env.AGENT_CONFIG || 'agent') {
   return join(configDir(), `${name}.yaml`);
 }
@@ -107,6 +118,46 @@ export function loadConfig(name = process.env.AGENT_CONFIG || 'agent') {
       : join(resolveStateDir(), String(cfg.state.ledger).replace(/^state[\/]/, '')),
     enabledMotions: (cfg.motions || []).filter((m) => m?.enabled),
   };
+  return cfg;
+}
+
+/**
+ * The config a host runs on when there is NO config file yet.
+ *
+ * A brand-new install has nothing to load, and the agent's whole answer to that
+ * is "DM me and I'll interview you and write it". That answer was unreachable:
+ * the host exited on the missing file before Slack ever connected, so the
+ * onboarding conversation could not happen. This is the minimum that lets the
+ * host connect, bind an operator, and run an onboarding session — nothing more.
+ *
+ * Deliberately NOT a set of working defaults. There are no motions, no
+ * approvals channel and no owners, so nothing can run or send; the tick loop
+ * skips entirely while __bootstrap is set. The only useful thing a bootstrap
+ * host can do is talk to you, which is exactly the point.
+ *
+ * A config that exists but is INVALID still fails hard — booting a half-broken
+ * tenant on empty defaults would be far worse than refusing to start.
+ */
+export function bootstrapConfig(name = process.env.AGENT_CONFIG || 'agent') {
+  const cfg = {
+    motions: [],
+    owners: [],
+    approval: {},
+    chat: {},
+    slack: {},
+    state: { ledger: 'state/ledger.db' },
+    voice_pack: null,
+  };
+  cfg.__meta = {
+    name,
+    path: configPath(name),
+    stateDir: resolveStateDir(),
+    voicePackPath: null,
+    plays: [],
+    ledgerPath: join(resolveStateDir(), 'ledger.db'),
+    enabledMotions: [],
+  };
+  cfg.__bootstrap = true;
   return cfg;
 }
 
@@ -572,14 +623,21 @@ export function checkEnvironment({ dryRun = false } = {}) {
   const has = (k) => !isBlank(process.env[k]);
   const checks = [];
 
+  // Neither variable being set is NOT an error on a workstation: the `claude`
+  // CLI falls back to its own stored login, which is how most people run this
+  // locally. A container has no interactive login and does need one of these,
+  // which is what the message says. Whether auth actually WORKS is proven by
+  // the live round trip in preflight — a token being present never meant it
+  // was valid, and an expired one silently overrides a good CLI session.
   const model = has('ANTHROPIC_API_KEY') || has('CLAUDE_CODE_OAUTH_TOKEN');
   checks.push({
     key: 'model access',
-    ok: model,
-    fatal: true,
+    ok: true,
+    fatal: false,
     detail: model
       ? (has('ANTHROPIC_API_KEY') ? 'ANTHROPIC_API_KEY is set' : 'CLAUDE_CODE_OAUTH_TOKEN is set')
-      : 'Set ANTHROPIC_API_KEY (pay-as-you-go) or CLAUDE_CODE_OAUTH_TOKEN (existing Claude subscription). See .env.example.',
+      : 'no token set — the claude CLI will use its own login. Fine locally; a container needs '
+        + 'CLAUDE_CODE_OAUTH_TOKEN (subscription) or ANTHROPIC_API_KEY (pay-as-you-go).',
   });
 
   // Setting both is a real footgun: the API key silently takes precedence, so

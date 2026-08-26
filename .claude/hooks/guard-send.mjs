@@ -95,34 +95,48 @@ function allow() {
 }
 
 // --- 0. Unknown MCP servers --------------------------------------------------
-// The architecture has exactly ONE model-facing MCP server: the agent tool
-// server (mcp__agent__*), which holds the credentials and enforces every rule
-// in code. Any other MCP server reaching the model means the session was
-// wired differently than designed — deny it wholesale rather than trying to
-// out-guess an unknown tool surface. Legacy deployments that intentionally
-// attach raw provider servers can name them in GUARD_MCP_SERVERS
-// (comma-separated); the fine-grained rules below then still apply to them.
-const ALLOWED_MCP_SERVERS = new Set(
-  (process.env.GUARD_MCP_SERVERS || 'agent').split(',').map((s) => s.trim()).filter(Boolean),
-);
-{
-  const m = toolName.match(/^mcp__([a-z0-9-]+)__/i);
-  if (m && !ALLOWED_MCP_SERVERS.has(m[1])) {
+// Only servers the deployment explicitly permits may reach the model. Anything
+// else means the session was wired differently than designed, and an unknown
+// tool surface cannot be reasoned about — deny it wholesale.
+//
+// Matched by PREFIX, not by parsing the server name out of the tool name.
+// Claude Code sanitises a server name into the tool prefix by replacing invalid
+// characters with underscores, so a connector called "plugin:founder-pack:
+// firsttouch" arrives as `mcp__plugin_founder-pack_firsttouch__…`. The previous
+// version matched `^mcp__([a-z0-9-]+)__`, whose character class excludes the
+// underscore: the match simply FAILED on such a name and the check fell through
+// to allow. A guard that silently stops applying to exactly the servers most
+// worth guarding is worse than no guard at all.
+const ALLOWED_MCP_SERVERS = (process.env.GUARD_MCP_SERVERS || 'agent')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+if (/^mcp__/i.test(toolName)) {
+  const permitted = ALLOWED_MCP_SERVERS.some((s) => toolName.toLowerCase().startsWith(`mcp__${s.toLowerCase()}__`));
+  if (!permitted) {
     deny(
-      `Blocked by the send guard: "${toolName}" belongs to MCP server "${m[1]}", which is not ` +
-      `one this agent is designed to talk to (permitted: ${[...ALLOWED_MCP_SERVERS].join(', ')}). ` +
-      `All platform access goes through the agent tool server, which enforces suppression, ` +
-      `caps, ownership and approvals in code.`,
+      `Blocked by the send guard: "${toolName}" belongs to an MCP server this agent is not ` +
+      `designed to talk to (permitted: ${ALLOWED_MCP_SERVERS.join(', ')}). Platform access goes ` +
+      `through servers the deployment declared, so suppression, caps, ownership and approvals ` +
+      `are enforced in code rather than assumed.`,
     );
   }
 }
 
+// The tool name with its `mcp__<server>__` prefix removed. The character class
+// MUST include the hyphen and underscore for the same sanitised-name reason as
+// above; without them this left the prefix attached and every rule below —
+// which matches on bare verbs — silently stopped matching.
+const bareName = toolName.replace(/^mcp__[a-z0-9_-]+?__/i, '');
+
 // --- 1. Tools that deliver a message immediately -----------------------------
 // These bypass the approval queue by definition. There is no configuration that
 // turns this off, and that is the point.
-const IMMEDIATE_SEND = /^mcp__outreach__(send_|.*_send$|.*send_message|send_linkedin|send_email|send_now)/i;
+// Matched against the BARE name so it holds whatever the server is called.
+// Anchoring to `mcp__outreach__` meant the rule stopped applying the moment the
+// platform arrived as a connector under its own name.
+const IMMEDIATE_SEND = /(^|_)(send_message|send_linkedin|send_email|send_now)(_|$)|^send_|_send$/i;
 
-if (IMMEDIATE_SEND.test(toolName)) {
+if (IMMEDIATE_SEND.test(bareName)) {
   deny(
     `Blocked by the send guard: "${toolName}" delivers a message directly to a person, ` +
     `bypassing the approval queue. This agent may only CREATE approval-gated actions ` +
@@ -136,8 +150,7 @@ if (IMMEDIATE_SEND.test(toolName)) {
 // start: tools are named both `update_property` and `crm_update_property`
 // depending on the adapter, and anchoring to the start silently misses the
 // second form. A guard that quietly fails open is worse than no guard.
-const bareName = toolName.replace(/^mcp__[a-z0-9_]+?__/i, '');
-const MUTATING = /(^|_)(create|add|update|set|enroll|remove|delete|complete|edit|manage|publish|import|bulk|assign|merge|skip|start|send|cancel|archive)(_|$)/i;
+const MUTATING =/(^|_)(create|add|update|set|enroll|remove|delete|complete|edit|manage|publish|import|bulk|assign|merge|skip|start|send|cancel|archive)(_|$)/i;
 
 if (dryRun && MUTATING.test(bareName)) {
   deny(
@@ -210,9 +223,9 @@ if (FLOW_ENROLLMENT.test(bareName)) {
 // Creating an action with approval switched off produces something that sends
 // the moment it is created. Some platforms default this to false, so an omitted
 // flag is not safe to treat as "approval on".
-const CREATES_ACTION = /^mcp__outreach__(add_dynamic_action|create_.*action)/i;
+const CREATES_ACTION = /^(add_dynamic_action|create_.*action)/i;
 
-if (CREATES_ACTION.test(toolName)) {
+if (CREATES_ACTION.test(bareName)) {
   const flat = JSON.stringify(input);
   const approvalOff = /"(isHumanApprovalRequired|requiresApproval|human_approval|approval_required)"\s*:\s*false/i.test(flat);
   const approvalMissing = !/"(isHumanApprovalRequired|requiresApproval|human_approval|approval_required)"/i.test(flat);
