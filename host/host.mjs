@@ -352,6 +352,7 @@ function describeStep(ev) {
 const queue = [];
 let running = false;
 let currentChild = null, currentPreemptible = false;
+let currentTurnKey = null; // session key of the running turn — /slack/post uses it to adopt new threads
 function enqueue(job) {
   return new Promise((resolveJob) => {
     queue.push({ ...job, resolveJob });
@@ -367,9 +368,10 @@ async function pump() {
   if (running || queue.length === 0) return;
   running = true;
   const job = queue.shift();
+  currentTurnKey = job.key || null;
   try { job.resolveJob(await runTurn(job)); }
   catch (e) { job.resolveJob({ error: e.message }); }
-  finally { running = false; pump(); }
+  finally { running = false; currentTurnKey = null; pump(); }
 }
 
 /**
@@ -701,6 +703,12 @@ const api = createServer(async (req, res) => {
       const { channel, text, thread_ts } = data;
       if (!channel || !text) return reply(400, { error: 'channel and text are required' });
       const r = await say(channel, text, thread_ts);
+      // A top-level message posted by the running session opens a thread that
+      // BELONGS to that session: replies there must continue it.
+      if (r?.ok && !thread_ts && currentTurnKey) {
+        aliases[threadKey(r.channel, r.ts)] = currentTurnKey;
+        writeState('aliases.json', aliases);
+      }
       return reply(r?.ok ? 200 : 502, r?.ok ? { ts: r.ts, channel: r.channel } : { error: r?.error || 'post failed' });
     }
     if (req.method === 'GET' && url.pathname === '/slack/approval') {
@@ -770,17 +778,25 @@ let claimCode = null;
 // map is only the pairing.
 const sessions = readState('sessions.json', {});
 const threadKey = (channel, thread) => `${channel}:${thread}`;
+// A thread the HOST created on a session's behalf — a scheduled-run report,
+// a message the agent posted top-level — aliases back to that session's key,
+// so replying in it continues the conversation instead of starting a
+// stranger. Same Slack thread, same Claude session, whoever opened it.
+const aliases = readState('aliases.json', {});
+const resolveKey = (key) => aliases[key] || key;
 
 async function handleTurn(text, channel, thread) {
   // A DM (channel id D…) is ONE continuous session, whatever message you
   // reply to: top-level DM messages carry fresh timestamps, and keying
   // sessions on them made every message a cold start — full CLI boot, both
   // MCP handshakes, no memory of the conversation ("thinking forever" on the
-  // simplest ask). Channels keep per-thread sessions.
-  const key = channel.startsWith('D') ? channel : threadKey(channel, thread);
+  // simplest ask). Channels keep per-thread sessions, alias-resolved so
+  // host-created threads continue their session.
+  const key = resolveKey(channel.startsWith('D') ? channel : threadKey(channel, thread));
   const status = liveStatus(channel, thread);
   const res = await enqueue({
     prompt: text,
+    key,
     resume: sessions[key] ?? null,
     onProgress: (step) => status.note(step),
   });
@@ -834,6 +850,7 @@ async function handleEvent(ev) {
   //     says "use tuesday's subject line instead" without being the operator.
   const knownThread = ev.thread_ts
     && (sessions[threadKey(ev.channel, ev.thread_ts)]
+      || aliases[threadKey(ev.channel, ev.thread_ts)]
       || Object.values(approvals).some((c) => c.channel === ev.channel && c.ts === ev.thread_ts));
   const trustedSpeaker = ev.user === operator || EXTRA_USERS.has(ev.user);
   if (isChannelMsg && ev.type !== 'app_mention' && !knownThread) return; // ambient channel chatter
@@ -978,13 +995,21 @@ async function scheduleTick() {
       const target = opened?.ok ? opened.channel.id : channel;
       const posted = await say(target, `⏰ Running "${s.name}"…`);
       const thread = posted?.ts;
+      const key = thread ? threadKey(posted.channel || target, thread) : null;
       const status = liveStatus(target, thread);
       const res = await enqueue({
         prompt: `[Scheduled run "${s.name}", fired ${s.firedFor.toISOString()} (${TIMEZONE}). ` +
           `Do the work below and reply with a short report a person will read in Slack.]\n\n${s.prompt}`,
+        key,
         onProgress: (step) => status.note(step),
         timeoutMs: 90 * 60 * 1000,
       });
+      // Replies in the report thread continue the run's session — "why did
+      // you skip Acme?" should reach the session that skipped Acme.
+      if (key && res.sessionId) {
+        sessions[key] = res.sessionId;
+        writeState('sessions.json', sessions);
+      }
       await status.finish(res.result || `The scheduled run failed: ${res.error}`);
     }
   } catch (e) {
