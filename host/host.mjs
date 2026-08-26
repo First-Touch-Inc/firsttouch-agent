@@ -475,71 +475,109 @@ async function downloadImages(files) {
 const approvals = readState('approvals.json', {});
 const saveApprovals = () => writeState('approvals.json', approvals);
 
+// ---- card rendering — ported from the internal approval hub's draftBlocks()
+// so public cards render the exact layout FirstTouch runs internally: one
+// dense head section (name · title @ company, italic why, sequence shape +
+// teaser) with the avatar accessory, hub-style buttons, links-only footer.
+// Change this only in step with the hub's renderer.
+const trunc = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? `${s.slice(0, n - 1)}…` : s; };
+const stepKind = (s) => {
+  const t = `${s?.kind || ''} ${s?.label || ''}`.toLowerCase();
+  if (/email/.test(t)) return 'email';
+  if (/linkedin|connect|inmail|\bdm\b|message/.test(t)) return 'dm';
+  return 'other';
+};
+function seqShape(steps) {
+  const emails = steps.filter((s) => stepKind(s) === 'email').length;
+  const dms = steps.filter((s) => stepKind(s) === 'dm').length;
+  const parts = [];
+  if (emails) parts.push(`📧 ${emails} email${emails > 1 ? 's' : ''}`);
+  if (dms) parts.push(`💬 ${dms} DM${dms > 1 ? 's' : ''}`);
+  if (parts.length) return parts.join(' · ');
+  return steps.length ? `📋 ${steps.length} step${steps.length > 1 ? 's' : ''} to review` : '';
+}
+function cardBlocks(card) {
+  const p = card.prospect || {};
+  const steps = card.steps || [];
+  const name = p.name || card.title;
+  // The hub's trick for never-missing headshots: a generated-initials avatar
+  // stands in whenever there is no real photo.
+  const avatar = p.image_url ||
+    `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&size=128&background=36573b&color=fff&bold=true`;
+  const teaser = trunc(steps[0]?.copy || '', 110);
+  const shape = seqShape(steps);
+  const head = {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text:
+        `*${name}*${p.title ? ` · ${p.title}` : ''}${p.company ? ` @ *${p.company}*` : ''}\n` +
+        (card.research ? `_${trunc(card.research, 200)}_\n` : '') +
+        `${shape}${card.edited_copy ? '  ·  ✏️ edited' : ''}${teaser ? `   >  ${teaser}` : ''}`,
+    },
+    accessory: { type: 'image', image_url: avatar, alt_text: name },
+  };
+  const links = card.links || [];
+  const ftUrl = links.find((l) => /firsttouch/i.test(`${l?.text} ${l?.url}`))?.url;
+  const liUrl = links.find((l) => /linkedin/i.test(`${l?.text} ${l?.url}`))?.url;
+  const blocks = [head];
+  if (card.legacy_body) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: card.legacy_body } });
+  if (card.status === 'pending') {
+    blocks.push({
+      type: 'actions',
+      elements: [
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: '✅ Approve' }, action_id: 'approval:approve', value: card.id },
+        { type: 'button', text: { type: 'plain_text', text: '✏️ Review / Edit' }, action_id: 'approval:edit', value: card.id },
+        { type: 'button', style: 'danger', text: { type: 'plain_text', text: '❌ Deny' }, action_id: 'approval:deny', value: card.id },
+      ],
+    });
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: [
+        ftUrl ? `🔗 <${ftUrl}|View in FirstTouch ↗>` : null,
+        liUrl ? `<${liUrl}|LinkedIn ↗>` : null,
+      ].filter(Boolean).join('   ·   ') || ' ' }],
+    });
+  } else {
+    const actor = card.decided_by?.id ? `<@${card.decided_by.id}>` : (card.decided_by?.name || 'someone');
+    const label = card.status === 'denied' ? '❌ Denied'
+      : card.edited_copy ? '✏️ Approved with edits' : '✅ Approved';
+    const link = card.status === 'approved' && ftUrl ? `\n🔗 <${ftUrl}|View in FirstTouch ↗>` : '';
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `${label} by ${actor} · ${card.decided_at || ''}${link}` }],
+    });
+  }
+  return blocks;
+}
+
 async function postApprovalCard({
   id, channel, title, text,
   copy = '', summary = '', sender = '', prospect = null, links = [], task_ids = [],
   research = '', steps = [],
 }) {
-  // Two rendering paths. With `steps[]` (the preferred contract) the layout
-  // is ENTIRELY the host's: computed summary, italic research line, quoted
-  // step-1 preview, and the full sequence posted by the host into the
-  // thread — identical shape on every card, because the agent hands over
-  // data, never prose. Legacy `text` still renders as a capped body.
   const structured = steps.length > 0;
-  const CARD_BODY_MAX = 1000;
-  const legacyBody = toSlackMrkdwn(String(text));
-  const clipped = !structured && legacyBody.length > CARD_BODY_MAX;
-  // Header: the prospect, when the agent says who it is — name · title @
-  // company with their photo — falling back to the plain title.
-  const headline = prospect?.name
-    ? `*${prospect.name}*${prospect.title ? ` · ${prospect.title}` : ''}${prospect.company ? ` @ ${prospect.company}` : ''}\n${title}`
-    : `*${title}*`;
-  const shortLabel = (s, i) => String(s.label || `step ${i + 1}`).split(/[—(:]/)[0].trim() || `step ${i + 1}`;
-  const computedSummary = structured
-    ? `${steps.length} touch${steps.length === 1 ? '' : 'es'}: ${steps.map(shortLabel).join(' → ')}`.slice(0, 150)
-    : '';
-  const contextBits = [sender && `Sender: ${sender}`, summary || computedSummary].filter(Boolean).join('   ·   ');
-  const cardQuote = (s) => toSlackMrkdwn(String(s)).split('\n').map((l) => `> ${l}`).join('\n');
-  let bodyText;
-  if (structured) {
-    const s0 = steps[0];
-    const previewFull = String(s0.copy || '');
-    bodyText = [
-      research ? `_${toSlackMrkdwn(String(research)).slice(0, 400)}_` : '',
-      `*${toSlackMrkdwn(String(s0.label || 'Step 1'))}*${s0.subject ? `\nSubject: ${toSlackMrkdwn(String(s0.subject))}` : ''}`,
-      cardQuote(previewFull.slice(0, 280)) + (previewFull.length > 280 ? '\n> …' : ''),
-      steps.length > 1 ? `_All ${steps.length} steps in full in this thread._` : '_Full copy in this thread._',
-    ].filter(Boolean).join('\n').slice(0, 2900);
-  } else {
-    bodyText = legacyBody.slice(0, CARD_BODY_MAX) + (clipped ? '\n_…full draft in this thread._' : '');
-  }
-  // Footer: links only. Task ids are plumbing — they live in the approval
-  // record and the wake-up prompt, never on the card.
-  const footer = (Array.isArray(links) ? links : []).filter((l) => l?.url)
-    .map((l) => `<${l.url}|${toSlackMrkdwn(String(l.text || 'link'))}>`).join('  ·  ');
+  const legacyBody = structured ? '' : toSlackMrkdwn(String(text));
+  const clipped = legacyBody.length > 1000;
+  // The record is also the render input: settle re-renders the same card from
+  // it with the settled status, exactly like the hub's updateCard does.
+  const record = {
+    id, channel, title, task_ids,
+    prospect: prospect || null,
+    research: String(research || ''),
+    steps,
+    links: (Array.isArray(links) ? links : []).filter((l) => l?.url),
+    legacy_body: legacyBody ? legacyBody.slice(0, 1000) + (clipped ? '\n_…full draft in this thread._' : '') : '',
+    status: 'pending', created_at: new Date().toISOString(),
+  };
   const res = await slack('chat.postMessage', {
     channel,
     text: `Approval needed: ${title}`,
     unfurl_links: false, unfurl_media: false,
-    blocks: [
-      {
-        type: 'section', text: { type: 'mrkdwn', text: headline.slice(0, 2900) },
-        ...(prospect?.image_url ? { accessory: { type: 'image', image_url: prospect.image_url, alt_text: prospect?.name || 'prospect' } } : {}),
-      },
-      ...(contextBits ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: contextBits.slice(0, 2900) }] }] : []),
-      { type: 'section', text: { type: 'mrkdwn', text: bodyText } },
-      {
-        type: 'actions',
-        elements: [
-          { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Approve' }, action_id: 'approval:approve', value: id },
-          { type: 'button', text: { type: 'plain_text', text: 'Review / Edit' }, action_id: 'approval:edit', value: id },
-          { type: 'button', style: 'danger', text: { type: 'plain_text', text: 'Deny' }, action_id: 'approval:deny', value: id },
-        ],
-      },
-      ...(footer ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: footer.slice(0, 2900) }] }] : []),
-    ],
+    blocks: cardBlocks(record),
   });
   if (!res.ok) return { error: `Slack refused the card: ${res.error}` };
+  record.ts = res.ts;
   // The thread carries the document — host-posted, so it is always complete
   // and always the same shape. (say() converts Markdown, so raw goes in.)
   if (structured) {
@@ -547,18 +585,14 @@ async function postApprovalCard({
     const detail = steps.map((s, i) =>
       `**Step ${i + 1} — ${s.label || ''}**${s.subject ? `\nSubject: ${s.subject}` : ''}\n${rawQuote(s.copy || '')}`,
     ).join('\n\n');
-    await say(channel, (research ? `_${String(research)}_\n\n` : '') + detail, res.ts);
+    await say(channel, (sender ? `Sender: ${sender}\n` : '') + (research ? `_${String(research)}_\n\n` : '') + detail, res.ts);
   } else if (clipped) {
     await say(channel, legacyBody, res.ts);
   }
-  const editCopy = String(copy || (structured
+  record.copy = String(copy || (structured
     ? steps.map((s, i) => `--- STEP ${i + 1}${s.label ? ` — ${s.label}` : ''} ---\n${s.copy || ''}`).join('\n\n')
     : '')).slice(0, 2900);
-  approvals[id] = {
-    id, channel, ts: res.ts, title, task_ids,
-    copy: editCopy,
-    status: 'pending', created_at: new Date().toISOString(),
-  };
+  approvals[id] = record;
   saveApprovals();
   return { id, channel, ts: res.ts };
 }
@@ -575,10 +609,7 @@ async function settleApproval(card, decision, user, editedCopy = null) {
   await slack('chat.update', {
     channel: card.channel, ts: card.ts,
     text: `${verdict} — ${card.title}`,
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `*${card.title}*\n${verdict}` } },
-      ...(card.task_ids.length ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `FirstTouch task${card.task_ids.length === 1 ? '' : 's'}: ${card.task_ids.join(', ')}` }] }] : []),
-    ],
+    blocks: cardBlocks(card),
   });
 
   // Wake the agent IN THE CARD'S THREAD with the outcome. The wake prompt is
