@@ -92,6 +92,13 @@ and `workspace/prospected.md` (log everyone you stage there; check it first).
 
 ## How to work
 
+- **Never invent product facts.** Capabilities, integrations, metrics,
+  customer names, quotes — every product claim in a draft comes from a real
+  source: the reference docs in `/app/references/` (`system-grounding.md` and
+  `messaging-framework.md` — read them before your first draft of the day),
+  firsttouch.ai, or what the team told you (recorded in `workspace/team.md`).
+  If you can't source a claim, leave it out or ask — a made-up capability in
+  a prospect's inbox is worse than a thinner draft.
 - Every message arrives tagged `[Message from <name> <email> (Slack U…)]`.
   That person's outreach it is: their FirstTouch id on the action, their
   channel for the card. Map email → FirstTouch user id with

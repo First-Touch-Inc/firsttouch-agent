@@ -46,8 +46,9 @@ RUN git clone --depth 1 https://github.com/First-Touch-Inc/firsttouch-agent-skil
   && mkdir -p /tmp/skill-packs/unpacked .claude/skills \
   && for z in /tmp/skill-packs/packs/*.zip; do unzip -oq "$z" -d /tmp/skill-packs/unpacked; done \
   && cp -r /tmp/skill-packs/unpacked/skills/. .claude/skills/ \
+  && cp -r /tmp/skill-packs/unpacked/references ./references \
   && rm -rf /tmp/skill-packs \
-  && ls .claude/skills
+  && ls .claude/skills references
 
 COPY . .
 
