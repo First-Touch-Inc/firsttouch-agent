@@ -152,7 +152,7 @@ test('a pending or denied card approves nothing', () => {
   });
 });
 
-test('complete_task without a recognisable task id is blocked — it cannot be checked', () => {
+test('complete_task without a recognizable task id is blocked — it cannot be checked', () => {
   withApprovals({ abc: { status: 'approved', task_ids: ['t1'] } }, () => {
     assert.ok(denied(decide('mcp__firsttouch__complete_task', {})));
   });
@@ -164,7 +164,7 @@ test('skipping and cancelling stay allowed — both are the safe direction', () 
   assert.equal(decide('mcp__firsttouch__remove_dynamic_action_prospect', {}), null);
 });
 
-// --- flows: enrol yes, author no ---------------------------------------------
+// --- flows: enroll yes, author no ---------------------------------------------
 
 test('authoring or publishing a flow is blocked', () => {
   for (const tool of ['create_flow_plan', 'update_flow_plan', 'replace_flow_root', 'manage_flow_publication']) {
@@ -182,12 +182,12 @@ function withFlowsFile(contents, fn) {
   }
 }
 
-test('without approved-flows.txt, enrolment into a published flow is allowed', () => {
+test('without approved-flows.txt, enrollment into a published flow is allowed', () => {
   if (existsSync(FLOWS_FILE)) return; // an operator restriction is in place; the next test covers it
   assert.equal(decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'any' }), null);
 });
 
-test('with approved-flows.txt, enrolment is limited to the listed ids', () => {
+test('with approved-flows.txt, enrollment is limited to the listed ids', () => {
   withFlowsFile('# permitted flows\nflow_ok_1\n', () => {
     assert.equal(decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1' }), null);
     const d = decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'flow_other' });
@@ -198,7 +198,7 @@ test('with approved-flows.txt, enrolment is limited to the listed ids', () => {
   });
 });
 
-test('flow enrolment does not relax the action gate', () => {
+test('flow enrollment does not relax the action gate', () => {
   withFlowsFile('flow_ok_1\n', () => {
     assert.ok(denied(decide('mcp__firsttouch__add_dynamic_action', { ownerId: 'u1' })));
     assert.ok(denied(decide('mcp__firsttouch__send_linkedin_unibox_message', {})));

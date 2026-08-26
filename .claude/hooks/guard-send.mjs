@@ -23,7 +23,7 @@
 //   4. Creating an outreach action without an explicit owner.
 //   5. Completing an approval task — approving is the human's half.
 //   6. Authoring or publishing flows — flow copy sends automatically, so a
-//      human writes and publishes it; the agent only enrols into it.
+//      human writes and publishes it; the agent only enrolls into it.
 //
 // Connector tools arrive as mcp__<server-or-uuid>__<tool>, so every check keys
 // off the BARE TOOL NAME after the prefix — a rename or a UUID-namespaced
@@ -154,7 +154,7 @@ if (/^complete_task$/i.test(bare)) {
     .flatMap((m) => m[1] ? [m[1]] : String(m[2] ?? '').split(',').map((s) => s.replace(/["\s]/g, '')).filter(Boolean));
   if (referenced.length === 0) {
     deny(
-      `Blocked by the send guard: complete_task was called without a recognisable task id, ` +
+      `Blocked by the send guard: complete_task was called without a recognizable task id, ` +
       `so it cannot be checked against recorded human approvals. Pass the task id explicitly.`,
     );
   }
@@ -170,7 +170,7 @@ if (/^complete_task$/i.test(bare)) {
   allow(); // every referenced task carries a recorded human approval
 }
 
-// --- 6. Flows: enrol yes, author no ------------------------------------------
+// --- 6. Flows: enroll yes, author no ------------------------------------------
 // A flow's copy sends automatically once published, so writing or publishing
 // one is authoring outreach nobody will review per-send. A human does that.
 // Enrolling a qualified person into an already-published flow is the agent's
@@ -180,13 +180,13 @@ if (FLOW_AUTHORING.test(bare)) {
   deny(
     `Blocked by the send guard: "${bare}" creates or publishes a flow. The agent ` +
     `decides WHO belongs in a flow, never what a flow says or whether it goes live. ` +
-    `Ask a human to author and publish it, then enrol into it.`,
+    `Ask a human to author and publish it, then enroll into it.`,
   );
 }
 
 // Optional tightening: if approved-flows.txt exists at the repo root (one flow
-// id per line, # comments), enrolment is limited to the ids in it. Without the
-// file, enrolment into any PUBLISHED flow is allowed — published means a human
+// id per line, # comments), enrollment is limited to the ids in it. Without the
+// file, enrollment into any PUBLISHED flow is allowed — published means a human
 // wrote the copy and chose to make it live.
 const FLOW_ENROLLMENT = /^(add_manual_flow_enrollment|enroll_awaiting_flow_items|reenroll_flow_enrollments|attach_audience_to_flow)$/i;
 if (FLOW_ENROLLMENT.test(bare)) {
@@ -200,7 +200,7 @@ if (FLOW_ENROLLMENT.test(bare)) {
           .map((l) => l.replace(/#.*$/, '').trim()).filter(Boolean),
       );
     } catch {
-      deny(`Blocked by the send guard: approved-flows.txt exists but could not be read, so enrolment is refused. Fix the file and retry.`);
+      deny(`Blocked by the send guard: approved-flows.txt exists but could not be read, so enrollment is refused. Fix the file and retry.`);
     }
     const referenced = [...flat.matchAll(/"(?:flow_?plan_?id|flowPlanId|flowId|flow_id)"\s*:\s*"([^"]+)"/gi)].map((m) => m[1]);
     if (referenced.length === 0) {

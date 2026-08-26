@@ -274,7 +274,7 @@ function describeStep(ev) {
     }
     if (raw === 'WebFetch') return 'reading a web page';
     if (raw === 'Task') return 'delegating a sub-task';
-    // MCP tools: humanise the bare name. "add_dynamic_action" → "add dynamic action".
+    // MCP tools: humanize the bare name. "add_dynamic_action" → "add dynamic action".
     const bare = raw.replace(/^mcp__[^_]*(?:_[^_]+)*?__/i, '').replace(/^mcp__/i, '');
     return bare.replace(/_/g, ' ').trim() || null;
   }

@@ -10,7 +10,7 @@
 // The evaluator walks forward minute by minute (bounded), asking "do this
 // instant's wall-clock parts in the tenant's timezone match?" — which makes
 // DST handling Intl's problem, not ours: a skipped hour simply never matches,
-// a repeated hour matches twice, and both are the least surprising behaviour.
+// a repeated hour matches twice, and both are the least surprising behavior.
 
 const FIELD_RANGES = [
   { name: 'minute', min: 0, max: 59 },

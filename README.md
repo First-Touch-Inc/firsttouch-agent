@@ -139,7 +139,7 @@ every MCP tool call in every session, scheduled or interactive, and denies:
 | `complete_task` without a recorded human Approve click | the agent never approves its own work — the host records each click (Slack-authenticated identity) and the hook permits completing exactly those task ids |
 | Creating/editing/publishing flows | flow copy sends automatically, so a human authors it |
 
-Flow *enrolment* is allowed (published flows carry human-written copy); create
+Flow *enrollment* is allowed (published flows carry human-written copy); create
 `approved-flows.txt` (one flow id per line) to restrict which ones.
 
 The hook keys off bare tool names, so renamed or UUID-namespaced connectors
