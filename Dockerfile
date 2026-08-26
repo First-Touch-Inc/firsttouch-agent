@@ -27,7 +27,7 @@ FROM node:22-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep gosu \
   && rm -rf /var/lib/apt/lists/* \
-  && useradd --uid 10001 --no-create-home --shell /bin/bash agent
+  && useradd --uid 10001 --no-create-home --home-dir /data/home --shell /bin/bash agent
 
 WORKDIR /app
 COPY package.json package-lock.json ./

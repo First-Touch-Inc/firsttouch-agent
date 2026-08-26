@@ -12,4 +12,8 @@ mkdir -p /data/agent /data/home
 if [ "$(stat -c %u /data)" != "10001" ]; then
   chown -R agent:agent /data
 fi
-exec gosu agent "$@"
+# env HOME= on purpose: gosu re-derives HOME from /etc/passwd, which silently
+# overrode the image's ENV and pointed the CLI at an unwritable /home/agent.
+# The passwd entry now also says /data/home; this line makes it true even if
+# that regresses.
+exec gosu agent env HOME=/data/home "$@"
