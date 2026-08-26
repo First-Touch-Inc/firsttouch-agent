@@ -275,14 +275,22 @@ const speakerTag = (u) => u.lookupError
  * answer — edited in place, so the reply is never buried under its own
  * progress log. Edits are throttled; only the recent steps are shown.
  */
+// Every open ticker, so a shutdown can tell the human instead of freezing a
+// "working…" forever (the 11-minutes-of-silence failure, 2026-08-26).
+const OPEN_STATUSES = new Set();
+
 function liveStatus(channel, thread) {
   const steps = [];
+  const startedAt = Date.now();
   let ts = null, timer = null, closed = false;
   // One line, updated in place — a ticker, not a log. The full step history
-  // stays in `steps` only to dedupe consecutive repeats.
-  const render = () => (steps.length
-    ? `_working…_  ·  ${steps[steps.length - 1]}`
-    : '_working…_');
+  // stays in `steps` only to dedupe consecutive repeats. After two minutes
+  // the line carries its age, so a long think reads alive, not dead.
+  const render = () => {
+    const mins = Math.floor((Date.now() - startedAt) / 60_000);
+    const age = mins >= 2 ? `  ·  _${mins}m_` : '';
+    return steps.length ? `_working…_  ·  ${steps[steps.length - 1]}${age}` : `_working…_${age}`;
+  };
   const started = slack('chat.postMessage', withIcon({ channel, text: render(), thread_ts: thread }))
     .then((r) => { if (r.ok) ts = r.ts; })
     .catch(() => {});
@@ -291,7 +299,9 @@ function liveStatus(channel, thread) {
     if (closed || !ts) return;
     await slack('chat.update', { channel, ts, text: render() });
   };
-  return {
+  const heartbeat = setInterval(() => { if (!closed) flush().catch(() => {}); }, 60_000);
+  heartbeat.unref?.();
+  const self = {
     note(step) {
       if (closed || steps[steps.length - 1] === step) return;
       steps.push(step);
@@ -301,6 +311,8 @@ function liveStatus(channel, thread) {
     },
     async finish(text) {
       closed = true;
+      clearInterval(heartbeat);
+      OPEN_STATUSES.delete(self);
       if (timer) { clearTimeout(timer); timer = null; }
       await started;
       const parts = chunks(text);
@@ -311,7 +323,19 @@ function liveStatus(channel, thread) {
         await say(channel, text, thread);
       }
     },
+    // The shutdown path: overwrite the ticker with the truth.
+    async interrupt(msg) {
+      closed = true;
+      clearInterval(heartbeat);
+      OPEN_STATUSES.delete(self);
+      if (timer) { clearTimeout(timer); timer = null; }
+      await started;
+      if (ts) await slack('chat.update', { channel, ts, text: msg });
+      else await say(channel, msg, thread);
+    },
   };
+  OPEN_STATUSES.add(self);
+  return self;
 }
 
 // --- narration ---------------------------------------------------------------
@@ -1094,6 +1118,23 @@ async function socketLoop() {
   await new Promise((res) => ws.addEventListener('close', res));
   log('socket closed');
 }
+
+// A redeploy or restart must never strand a frozen "working…" — before the
+// process dies it kills the session child and tells every open ticker what
+// happened. Railway sends SIGTERM and allows a short grace window.
+let shuttingDown = false;
+async function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`${sig} — notifying ${OPEN_STATUSES.size} in-flight status message(s), then exiting`);
+  try { currentChild?.kill('SIGTERM'); } catch { /* already gone */ }
+  await Promise.allSettled([...OPEN_STATUSES].map((s) => s.interrupt(
+    '⚠️ A restart landed mid-task and that run was lost — say it again and I\'ll start fresh.',
+  )));
+  process.exit(0);
+}
+process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(0)); });
+process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(0)); });
 
 log(`host up — model=${AGENT_MODEL} tz=${TIMEZONE} api=127.0.0.1:${API_PORT} work=${WORK_DIR}${operator ? '' : ' (waiting for the claim code above)'}`);
 while (true) {
