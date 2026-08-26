@@ -474,8 +474,12 @@ async function postApprovalCard({
   id, channel, title, text,
   copy = '', summary = '', sender = '', prospect = null, links = [], task_ids = [],
 }) {
+  // The card is a glance; the thread is the document. A tight cap keeps even
+  // a verbose draft from turning the card into a scroll — the full text
+  // always lands in the thread below it.
+  const CARD_BODY_MAX = 1000;
   const body = toSlackMrkdwn(String(text));
-  const clipped = body.length > 2000;
+  const clipped = body.length > CARD_BODY_MAX;
   // Header: the prospect, when the agent says who it is — name · title @
   // company with their photo — falling back to the plain title.
   const headline = prospect?.name
@@ -495,7 +499,7 @@ async function postApprovalCard({
         ...(prospect?.image_url ? { accessory: { type: 'image', image_url: prospect.image_url, alt_text: prospect?.name || 'prospect' } } : {}),
       },
       ...(contextBits ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: contextBits.slice(0, 2900) }] }] : []),
-      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2000) + (clipped ? '\n_…full draft in this thread._' : '') } },
+      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, CARD_BODY_MAX) + (clipped ? '\n_…full draft in this thread._' : '') } },
       {
         type: 'actions',
         elements: [
