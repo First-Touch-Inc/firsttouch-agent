@@ -381,14 +381,21 @@ const queue = [];
 let running = false;
 let currentChild = null, currentPreemptible = false;
 let currentTurnKey = null; // session key of the running turn — /slack/post uses it to adopt new threads
+// SIGTERM alone is a request the CLI can (and did) shrug off — a "killed"
+// reconcile kept holding the queue while a human waited. Escalate: TERM,
+// then KILL five seconds later if it is still there.
+function killChild(child) {
+  if (!child) return;
+  try { child.kill('SIGTERM'); } catch { /* already gone */ }
+  const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 5000);
+  t.unref?.();
+}
 function enqueue(job) {
   return new Promise((resolveJob) => {
     queue.push({ ...job, resolveJob });
     // A human never waits behind bookkeeping: if the running job is
     // preemptible (the reconcile sweep), kill it — it retries on a later tick.
-    if (!job.preemptible && running && currentPreemptible) {
-      try { currentChild?.kill('SIGTERM'); } catch { /* already gone */ }
-    }
+    if (!job.preemptible && running && currentPreemptible) killChild(currentChild);
     pump();
   });
 }
@@ -442,7 +449,7 @@ function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60
     currentPreemptible = preemptible;
 
     let out = '', err = '', pending = '', final = null, sessionId = resume, killed = false;
-    const timer = setTimeout(() => { killed = true; try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
+    const timer = setTimeout(() => { killed = true; killChild(child); }, timeoutMs);
     child.stdout.on('data', (b) => {
       out += b; pending += b;
       const lines = pending.split('\n');
@@ -1119,7 +1126,10 @@ setInterval(() => scheduleTick(), 30_000);
 // task ids and reports via POST /slack/reconcile. Those settles use the
 // distinct ft_approved / ft_canceled statuses, which the send guard reads as
 // nothing at all — bookkeeping, never authorization.
-let lastReconcile = 0;
+// Booted = reconciled, as far as the throttle cares: a fresh process used to
+// forget its last run and sweep 60s after EVERY deploy — precisely when a
+// human is testing the thing that was just deployed.
+let lastReconcile = Date.now();
 async function reconcileTick() {
   if (running || queue.length) return; // human turns always come first
   if (Date.now() - lastReconcile < 10 * 60e3) return;
@@ -1195,7 +1205,7 @@ async function shutdown(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`${sig} — notifying ${OPEN_STATUSES.size} in-flight status message(s), then exiting`);
-  try { currentChild?.kill('SIGTERM'); } catch { /* already gone */ }
+  killChild(currentChild);
   await Promise.allSettled([...OPEN_STATUSES].map((s) => s.interrupt(
     '⚠️ A restart landed mid-task and that run was lost — say it again and I\'ll start fresh.',
   )));
