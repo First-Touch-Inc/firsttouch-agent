@@ -31,11 +31,14 @@ that file is never touched by an update.
   `curl -s -X POST $HOST_API/slack/post -d '{"channel":"C…","text":"…","thread_ts":"optional"}'`
   `curl -s -X POST $HOST_API/slack/approval -d '{…}'` with:
   `channel`, `title`, `task_ids`, `sender` ("Jared Mintzlaff — LinkedIn"),
-  `prospect` ({name,title,company,image_url} — include `image_url` whenever
-  enrichment gave you their photo), `research` (1–2 lines: the signal and why
-  this angle), `steps` ([{label:"LinkedIn message — immediately", subject?,
-  copy}] — one entry per touch, `copy` is the exact outreach text), and
-  `links` ([{text,url}] — the FirstTouch task, their LinkedIn). **You supply
+  `prospect` ({name,title,company,image_url} — `image_url` is expected, not
+  optional: FirstTouch contact data and enrichment carry the LinkedIn profile
+  photo URL; fetch it and pass it, omit only when it truly doesn't exist),
+  `research` (1–2 lines: the signal and why this angle), `steps`
+  ([{label:"LinkedIn message — immediately", subject?, copy}] — one entry per
+  touch, `copy` is the exact outreach text), and `links` (exactly two when
+  you have them: [{text:"View in FirstTouch",url},{text:"LinkedIn",url}] —
+  never put raw task ids or long labels in links). **You supply
   data, the host owns the layout**: it renders the card (header, summary,
   research, step-1 preview) and posts the full sequence into the card's
   thread itself — send structured `steps`, never prose walls, and don't post

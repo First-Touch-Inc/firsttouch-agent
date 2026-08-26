@@ -211,7 +211,12 @@ function chunks(text) {
 async function say(channel, text, thread_ts) {
   let first = null;
   for (const part of chunks(text)) {
-    const r = await slack('chat.postMessage', { channel, text: toSlackMrkdwn(part), thread_ts });
+    // No unfurls: a LinkedIn URL in a report or card thread must not balloon
+    // into a preview box under the message.
+    const r = await slack('chat.postMessage', {
+      channel, text: toSlackMrkdwn(part), thread_ts,
+      unfurl_links: false, unfurl_media: false,
+    });
     first ??= r;
   }
   return first;
@@ -508,13 +513,14 @@ async function postApprovalCard({
   } else {
     bodyText = legacyBody.slice(0, CARD_BODY_MAX) + (clipped ? '\n_…full draft in this thread._' : '');
   }
-  const linkLine = (Array.isArray(links) ? links : []).filter((l) => l?.url)
+  // Footer: links only. Task ids are plumbing — they live in the approval
+  // record and the wake-up prompt, never on the card.
+  const footer = (Array.isArray(links) ? links : []).filter((l) => l?.url)
     .map((l) => `<${l.url}|${toSlackMrkdwn(String(l.text || 'link'))}>`).join('  ·  ');
-  const footer = [linkLine, task_ids.length ? `FirstTouch task${task_ids.length === 1 ? '' : 's'}: ${task_ids.join(', ')}` : '']
-    .filter(Boolean).join('   ·   ');
   const res = await slack('chat.postMessage', {
     channel,
     text: `Approval needed: ${title}`,
+    unfurl_links: false, unfurl_media: false,
     blocks: [
       {
         type: 'section', text: { type: 'mrkdwn', text: headline.slice(0, 2900) },
