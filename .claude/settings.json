@@ -3,14 +3,15 @@
 
   "//": [
     "Committed on purpose. Everyone who clones this repo gets the same safety",
-    "controls, and changing them is a reviewable diff rather than a local",
-    "setting nobody sees.",
+    "control, and changing it is a reviewable diff rather than a local setting",
+    "nobody sees.",
     "",
-    "The PreToolUse hook below is what makes the README's claim true: the agent",
-    "cannot send to a prospect without a human approving first. Enforced here in",
-    "code rather than asked for in a prompt, because a prompt is guidance and a",
-    "hook is a control. Removing it does not just relax a default — it makes the",
-    "project's central promise false. See .claude/hooks/guard-send.mjs."
+    "The PreToolUse hook is what makes the README's claim true: the agent",
+    "cannot put a message in front of a person without a human approving it",
+    "first. Enforced in code rather than asked for in a prompt, because a",
+    "prompt is guidance and a hook is a control. Removing it does not just",
+    "relax a default — it makes the project's central promise false.",
+    "See .claude/hooks/guard-send.mjs."
   ],
 
   "hooks": {
@@ -25,30 +26,6 @@
           }
         ]
       }
-    ]
-  },
-
-  "//permissions": [
-    "Read(...) rules govern ALL file-reading tools — Read, Glob and Grep alike.",
-    "Glob(...)/Grep(...) rules are not matched by file permission checks, so",
-    "listing them here does nothing except emit a warning on every spawn, which",
-    "corrupted the CLI's JSON output and surfaced as a wall of stderr in Slack."
-  ],
-  "permissions": {
-    "deny": [
-      "Bash",
-      "Write",
-      "Edit",
-      "NotebookEdit",
-      "WebFetch(domain:localhost)",
-      "WebFetch(domain:127.0.0.1)",
-      "Read(/proc/**)",
-      "Read(/sys/**)",
-      "Read(**/.env)",
-      "Read(**/.env.*)",
-      "Read(**/*-oauth.json)",
-      "Read(**/*.db)",
-      "Read(**/.run/**)"
     ]
   }
 }

@@ -1,0 +1,8 @@
+[
+  {
+    "name": "daily-outbound",
+    "cron": "0 8 * * 1-5",
+    "channel": "C0123456789",
+    "prompt": "Work the target-account motion exactly as written in workspace/plays/outbound.md. Check suppression (FirstTouch enrollments + HubSpot customers/open deals) before staging anyone, and check workspace/prospected.md so nobody is touched twice. Stage up to 10 approval-gated touches, owner set per the playbook. Reply with a short report: who was staged and for whom, who was skipped and why."
+  }
+]

@@ -1,296 +1,177 @@
 // Tests for the send guard.
 //
 // This hook is the reason the README is allowed to say that nothing reaches a
-// prospect without human approval. If these tests fail, that sentence has
-// become false — treat a failure here as a release blocker, not a flaky test.
+// person without human approval. If these tests fail, that sentence has become
+// false — treat a failure here as a release blocker, not a flaky test.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
 
-const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', '.claude', 'hooks', 'guard-send.mjs');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const HOOK = join(ROOT, '.claude', 'hooks', 'guard-send.mjs');
 
-/** Run the hook against a raw stdin payload.
- *  The fine-grained rules below are exercised with GUARD_MCP_SERVERS set to
- *  the legacy raw-provider servers; the DEFAULT behaviour (only the agent
- *  tool server is permitted at all) has its own section at the end. */
-function decideRaw(input, { dryRun = false, servers = 'outreach,crm,agent' } = {}) {
+/** Run the hook and return its decision, or null for "allowed through". */
+function decide(toolName, toolInput = {}) {
   const res = spawnSync(process.execPath, [HOOK], {
-    input,
+    input: JSON.stringify({ tool_name: toolName, tool_input: toolInput }),
     encoding: 'utf8',
-    env: { ...process.env, DRY_RUN: dryRun ? '1' : '0', GUARD_MCP_SERVERS: servers },
+    env: { ...process.env },
   });
   assert.equal(res.status, 0, 'the hook must always exit 0 so it never breaks the run');
   if (!res.stdout.trim()) return null;
   return JSON.parse(res.stdout).hookSpecificOutput;
 }
 
-/** Run the hook with a tool call and return its decision, or null for "allowed". */
-function decide(toolName, toolInput = {}, opts = {}) {
-  return decideRaw(JSON.stringify({ tool_name: toolName, tool_input: toolInput }), opts);
-}
-
 const denied = (d) => d && d.permissionDecision === 'deny';
+
+// Connectors arrive under arbitrary prefixes — a plain name, a hyphen-underscore
+// sanitised plugin name, a claude.ai connector UUID. The guard must hold under
+// ALL of them, because a rename must never disarm it.
+const PREFIXES = [
+  'mcp__firsttouch__',
+  'mcp__plugin_founder-pack_firsttouch__',
+  'mcp__2d4048ad-e1cc-4d91-aadb-afa9518144f7__',
+];
 
 // --- immediate sends ---------------------------------------------------------
 
-for (const tool of [
-  'mcp__outreach__send_email',
-  'mcp__outreach__send_linkedin_unibox_message',
-  'mcp__outreach__send_campaign',
-  'mcp__outreach__send_now',
-]) {
-  test(`blocks the direct-send tool ${tool}`, () => {
-    assert.ok(denied(decide(tool)), `${tool} must never be allowed`);
+for (const prefix of PREFIXES) {
+  test(`direct sends are blocked under ${prefix}`, () => {
+    for (const tool of ['send_linkedin_unibox_message', 'send_campaign', 'send_now']) {
+      assert.ok(denied(decide(`${prefix}${tool}`)), `${prefix}${tool} must never be allowed`);
+    }
   });
 }
 
-// --- approval gate -----------------------------------------------------------
+// --- email: drafts only ------------------------------------------------------
 
-test('blocks an action created with approval explicitly disabled', () => {
-  const d = decide('mcp__outreach__add_dynamic_action', {
+test('email sends are blocked; drafting is not', () => {
+  assert.ok(denied(decide('mcp__gmail__send_message', { to: 'x@y.com' })));
+  assert.ok(denied(decide('mcp__gmail__reply', {})));
+  assert.ok(denied(decide('mcp__gmail__forward', {})));
+  assert.equal(decide('mcp__gmail__create_draft', {}), null, 'drafting stays allowed');
+  assert.equal(decide('mcp__gmail__update_draft', {}), null);
+});
+
+test('a Slack connector messaging the TEAM is not an email send', () => {
+  // Matched exactly, so slack_send_message (team-facing) is not caught by the
+  // send_message (email) rule.
+  assert.equal(decide('mcp__slack__slack_send_message', { channel: 'C1' }), null);
+});
+
+// --- outreach actions: approval on, owner explicit ---------------------------
+
+test('an action with approval explicitly disabled is blocked', () => {
+  const d = decide('mcp__firsttouch__add_dynamic_action', {
     isHumanApprovalRequired: false, ownerId: 'u1', action: { assignedUserId: 'u1' },
   });
   assert.ok(denied(d));
   assert.match(d.permissionDecisionReason, /approval/i);
 });
 
-test('blocks an action created with the approval flag omitted', () => {
-  // Omission is not safe to read as "approval on" — some platforms default it
-  // to false, which would send on creation.
-  const d = decide('mcp__outreach__add_dynamic_action', {
+test('an action with the approval flag omitted is blocked', () => {
+  // Omission is not "approval on" — some platforms default it to false, which
+  // would send on creation.
+  assert.ok(denied(decide('mcp__firsttouch__add_dynamic_action', {
     ownerId: 'u1', action: { assignedUserId: 'u1' },
+  })));
+});
+
+test('an action missing either owner field is blocked — both are required', () => {
+  const noOwner = decide('mcp__firsttouch__add_dynamic_action', {
+    isHumanApprovalRequired: true, action: { assignedUserId: 'u1' },
   });
-  assert.ok(denied(d));
+  assert.ok(denied(noOwner));
+  assert.match(noOwner.permissionDecisionReason, /ownerId/);
+
+  const noAssignee = decide('mcp__firsttouch__add_dynamic_action', {
+    isHumanApprovalRequired: true, ownerId: 'u1',
+  });
+  assert.ok(denied(noAssignee));
+  assert.match(noAssignee.permissionDecisionReason, /assignedUserId/);
 });
 
-test('blocks an approval-gated action that has no explicit owner', () => {
-  const d = decide('mcp__outreach__add_dynamic_action', { isHumanApprovalRequired: true });
-  assert.ok(denied(d));
-  assert.match(d.permissionDecisionReason, /owner/i);
-  assert.match(d.permissionDecisionReason, /not reversible/i);
-});
-
-test('allows a correctly gated, correctly owned action', () => {
-  const d = decide('mcp__outreach__add_dynamic_action', {
+test('a correctly gated, correctly owned action is allowed', () => {
+  assert.equal(decide('mcp__firsttouch__add_dynamic_action', {
     isHumanApprovalRequired: true, ownerId: 'u1', action: { assignedUserId: 'u1' },
+  }), null);
+});
+
+// --- approving is the human's half -------------------------------------------
+
+test('complete_task is blocked — the agent never approves its own work', () => {
+  const d = decide('mcp__firsttouch__complete_task', { taskId: 't1' });
+  assert.ok(denied(d));
+  assert.match(d.permissionDecisionReason, /human/i);
+});
+
+test('skipping and cancelling stay allowed — both are the safe direction', () => {
+  assert.equal(decide('mcp__firsttouch__skip_task', { taskId: 't1' }), null);
+  assert.equal(decide('mcp__firsttouch__cancel_flow_enrollments', {}), null);
+  assert.equal(decide('mcp__firsttouch__remove_dynamic_action_prospect', {}), null);
+});
+
+// --- flows: enrol yes, author no ---------------------------------------------
+
+test('authoring or publishing a flow is blocked', () => {
+  for (const tool of ['create_flow_plan', 'update_flow_plan', 'replace_flow_root', 'manage_flow_publication']) {
+    assert.ok(denied(decide(`mcp__firsttouch__${tool}`, {})), `${tool} must be blocked`);
+  }
+});
+
+const FLOWS_FILE = join(ROOT, 'approved-flows.txt');
+function withFlowsFile(contents, fn) {
+  const existed = existsSync(FLOWS_FILE);
+  const backup = existed ? readFileSync(FLOWS_FILE, 'utf8') : null;
+  writeFileSync(FLOWS_FILE, contents);
+  try { return fn(); } finally {
+    if (existed) writeFileSync(FLOWS_FILE, backup); else rmSync(FLOWS_FILE, { force: true });
+  }
+}
+
+test('without approved-flows.txt, enrolment into a published flow is allowed', () => {
+  if (existsSync(FLOWS_FILE)) return; // an operator restriction is in place; the next test covers it
+  assert.equal(decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'any' }), null);
+});
+
+test('with approved-flows.txt, enrolment is limited to the listed ids', () => {
+  withFlowsFile('# permitted flows\nflow_ok_1\n', () => {
+    assert.equal(decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1' }), null);
+    const d = decide('mcp__firsttouch__add_manual_flow_enrollment', { flowPlanId: 'flow_other' });
+    assert.ok(denied(d));
+    assert.match(d.permissionDecisionReason, /not listed/i);
+    // No id named at all → cannot be checked → blocked.
+    assert.ok(denied(decide('mcp__firsttouch__enroll_awaiting_flow_items', { audienceId: 'a1' })));
   });
-  assert.equal(d, null, 'a correct call must not be blocked');
 });
 
-// --- dry run -----------------------------------------------------------------
-
-test('a dry run blocks every mutating call, whatever the naming convention', () => {
-  // Both shapes occur: `update_property` and `crm_update_property`. Anchoring
-  // the verb to the start of the name misses the second and fails open.
-  for (const tool of [
-    'mcp__crm__crm_update_property',
-    'mcp__crm__update_property',
-    'mcp__outreach__add_dynamic_action',
-    'mcp__outreach__enroll_awaiting_flow_items',
-    'mcp__outreach__manage_flow_publication',
-  ]) {
-    assert.ok(denied(decide(tool, { isHumanApprovalRequired: true, ownerId: 'u1' }, { dryRun: true })),
-      `${tool} must be blocked in a dry run`);
-  }
-});
-
-test('a dry run still allows reads', () => {
-  for (const tool of ['mcp__crm__crm_get_contact', 'mcp__crm__crm_search_contacts', 'mcp__outreach__list_enrollments']) {
-    assert.equal(decide(tool, {}, { dryRun: true }), null, `${tool} should be readable in a dry run`);
-  }
+test('flow enrolment does not relax the action gate', () => {
+  withFlowsFile('flow_ok_1\n', () => {
+    assert.ok(denied(decide('mcp__firsttouch__add_dynamic_action', { ownerId: 'u1' })));
+    assert.ok(denied(decide('mcp__firsttouch__send_linkedin_unibox_message', {})));
+  });
 });
 
 // --- robustness --------------------------------------------------------------
 
 test('fails closed on an unparseable payload', () => {
-  // If the guard cannot tell what is being called, it must block. A guard that
-  // fails open under malformed input is not a guard.
-  assert.ok(denied(decideRaw('not json at all')), 'an unreadable tool call must be blocked, not allowed');
-  assert.ok(denied(decideRaw('{"tool_name": ')), 'truncated JSON must be blocked too');
+  const r = spawnSync(process.execPath, [HOOK], { input: '{not json', encoding: 'utf8', env: { ...process.env } });
+  assert.match(r.stdout, /"permissionDecision":"deny"/, 'an unreadable tool call must be blocked, not allowed');
 });
 
-test('an unrelated tool is not blocked', () => {
+test('built-in tools pass through untouched', () => {
+  assert.equal(decide('Bash', { command: 'ls' }), null);
   assert.equal(decide('Read', { file_path: 'x.md' }), null);
+  assert.equal(decide('WebSearch', {}), null);
 });
 
-// --- flows vs dynamic actions ------------------------------------------------
-// A dynamic action is the agent composing a message nobody has read. A flow is
-// copy a human wrote and published, so enrolling a qualified person into one
-// does not need a second approval of that copy. The agent may decide WHO is in
-// a flow; it may never decide what a flow says or whether it goes live.
-
-import { writeFileSync as wf, rmSync as rm, existsSync as ex, readFileSync as rf } from 'node:fs';
-import { join as pj, dirname as pd } from 'node:path';
-
-const REPO = pj(pd(fileURLToPath(import.meta.url)), '..');
-const TENANT_CFG = pj(REPO, 'config', 'agent.yaml');
-
-/** Put a config with one declared flow in place for the duration of a test. */
-function withFlows(ids, fn) {
-  const existed = ex(TENANT_CFG);
-  const backup = existed ? rf(TENANT_CFG, 'utf8') : null;
-  const flows = ids.length
-    ? 'flows:\n' + ids.map((id) => `  - id: "${id}"\n    name: "test"\n`).join('')
-    : 'flows: []\n';
-  wf(TENANT_CFG, `client:\n  name: "t"\n${flows}`);
-  try { return fn(); } finally {
-    if (existed) wf(TENANT_CFG, backup); else rm(TENANT_CFG, { force: true });
-  }
-}
-
-test('enrolling into a DECLARED flow is allowed without an approval flag', () => {
-  withFlows(['flow_ok_1'], () => {
-    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1', contactId: 'c1' });
-    assert.equal(d, null, 'a flow the operator declared must be enrollable');
-  });
-});
-
-test('enrolling into an UNDECLARED flow is blocked', () => {
-  withFlows(['flow_ok_1'], () => {
-    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_not_listed' });
-    assert.ok(denied(d));
-    assert.match(d.permissionDecisionReason, /not listed/i);
-  });
-});
-
-test('enrolling with no flow id named is blocked', () => {
-  withFlows(['flow_ok_1'], () => {
-    assert.ok(denied(decide('mcp__outreach__enroll_awaiting_flow_items', { audienceId: 'a1' })));
-  });
-});
-
-test('with no flows declared, enrolment is blocked entirely', () => {
-  withFlows([], () => {
-    const d = decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'anything' });
-    assert.ok(denied(d));
-  });
-});
-
-test('the agent may not author or publish a flow', () => {
-  withFlows(['flow_ok_1'], () => {
-    for (const tool of [
-      'mcp__outreach__create_flow_plan',
-      'mcp__outreach__update_flow_plan',
-      'mcp__outreach__manage_flow_publication',
-      'mcp__outreach__replace_flow_root',
-    ]) {
-      const d = decide(tool, { flowPlanId: 'flow_ok_1' });
-      assert.ok(denied(d), `${tool} must be blocked — publishing is a human's job`);
-    }
-  });
-});
-
-test('a dry run still blocks enrolment into a declared flow', () => {
-  withFlows(['flow_ok_1'], () => {
-    assert.ok(denied(decide('mcp__outreach__add_manual_flow_enrollment', { flowPlanId: 'flow_ok_1' }, { dryRun: true })));
-  });
-});
-
-test('flow enrolment does NOT relax the dynamic-action gate', () => {
-  withFlows(['flow_ok_1'], () => {
-    // The whole point of the split: one path loosened, the other unchanged.
-    assert.ok(denied(decide('mcp__outreach__add_dynamic_action', { ownerId: 'u1' })));
-    assert.ok(denied(decide('mcp__outreach__send_email', {})));
-  });
-});
-
-// --- the server allowlist ----------------------------------------------------
-// Only servers the deployment declared may reach the model at all. If an
-// undeclared server appears, the wiring is wrong and no fine-grained rule
-// should be trusted to out-guess an unknown tool surface.
-
-test('by default, any non-agent MCP server is denied wholesale — even reads', () => {
-  for (const tool of [
-    'mcp__outreach__list_enrollments',        // a read the legacy rules allow
-    'mcp__outreach__add_dynamic_action',
-    'mcp__crm__crm_search_contacts',
-    'mcp__gmail__send_message',
-    'mcp__anything__whatever',
-  ]) {
-    const d = decide(tool, { isHumanApprovalRequired: true, ownerId: 'u1' }, { servers: 'agent' });
-    assert.ok(denied(d), `${tool} must be denied when only the agent server is declared`);
-    assert.match(d.permissionDecisionReason, /not\s+designed to talk to/i);
-  }
-});
-
-test('the agent tool server itself passes through to the normal flow', () => {
-  assert.equal(decide('mcp__agent__propose_outreach', {}, { servers: 'agent' }), null);
-  assert.equal(decide('mcp__agent__set_config', {}, { servers: 'agent' }), null);
-});
-
-test('built-in tools are unaffected by the server allowlist', () => {
-  assert.equal(decide('Read', { file_path: 'x.md' }, { servers: 'agent' }), null);
-  assert.equal(decide('WebSearch', {}, { servers: 'agent' }), null);
-});
-
-// --- the platform as an MCP CONNECTOR ----------------------------------------
-// When the outreach platform arrives as a connector on the Claude Code run
-// rather than behind the agent tool server, the model holds its tools directly
-// and this hook becomes the ONLY thing between a draft and a real send.
-//
-// Claude Code sanitises a server name into the tool prefix, replacing invalid
-// characters with underscores: "plugin:founder-pack:firsttouch" becomes
-// `mcp__plugin_founder-pack_firsttouch__…`. Every rule must match that shape.
-
-const FT = 'mcp__plugin_founder-pack_firsttouch__';
-const WITH_FT = { servers: 'agent,plugin_founder-pack_firsttouch' };
-
-test('connector: a read is allowed', () => {
-  assert.equal(decide(`${FT}list_team_members`, {}, WITH_FT), null);
-});
-
-test('connector: a direct send is blocked', () => {
-  const d = decide(`${FT}send_linkedin_unibox_message`, { message: 'hi' }, WITH_FT);
-  assert.ok(denied(d));
-  assert.match(d.permissionDecisionReason, /directly to a person/i);
-});
-
-test('connector: creating an action without the approval flag is blocked', () => {
-  assert.ok(denied(decide(`${FT}add_dynamic_action`, { ownerId: 'u1' }, WITH_FT)));
-});
-
-test('connector: creating an action with approval off is blocked', () => {
-  assert.ok(denied(decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: false, ownerId: 'u1' }, WITH_FT)));
-});
-
-test('connector: an owner-less action is blocked', () => {
-  const d = decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true }, WITH_FT);
-  assert.ok(denied(d));
-  assert.match(d.permissionDecisionReason, /owner/i);
-});
-
-test('connector: a properly gated, owned action is allowed', () => {
-  assert.equal(decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true, ownerId: 'u1' }, WITH_FT), null);
-});
-
-test('connector: authoring or publishing a flow is blocked', () => {
-  withFlows(['flow_ok_1'], () => {
-    assert.ok(denied(decide(`${FT}create_flow_plan`, { name: 'x' }, WITH_FT)));
-    assert.ok(denied(decide(`${FT}manage_flow_publication`, {}, WITH_FT)));
-  });
-});
-
-test('connector: a dry run blocks mutations', () => {
-  const d = decide(`${FT}add_dynamic_action`, { isHumanApprovalRequired: true, ownerId: 'u1' },
-    { ...WITH_FT, dryRun: true });
-  assert.ok(denied(d));
-  assert.match(d.permissionDecisionReason, /DRY RUN/i);
-});
-
-test('a server name containing UNDERSCORES is still checked — the fail-open bug', () => {
-  // The rule matched `^mcp__([a-z0-9-]+)__`, whose character class excludes the
-  // underscore. Against a sanitised connector prefix the match simply FAILED,
-  // the check fell through to allow, and the guard silently stopped applying to
-  // exactly the servers most worth guarding.
-  const d = decide('mcp__some_other_server__send_message', {}, { servers: 'agent' });
-  assert.ok(denied(d), 'an undeclared server with underscores must still be denied');
-});
-
-test('prefix matching is not fooled by a partial server name', () => {
-  // "agent" must not permit "agentx".
-  assert.ok(denied(decide('mcp__agentx__send_message', {}, { servers: 'agent' })));
+test('reads and research on any connector pass through', () => {
+  assert.equal(decide('mcp__firsttouch__list_team_members', {}), null);
+  assert.equal(decide('mcp__firsttouch__discover_contacts', {}), null);
+  assert.equal(decide('mcp__2d4048ad-e1cc-4d91-aadb-afa9518144f7__get_contact_trace', {}), null);
+  assert.equal(decide('mcp__hubspot__crm_search_contacts', {}), null);
 });

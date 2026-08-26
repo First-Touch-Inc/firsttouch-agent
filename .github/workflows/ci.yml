@@ -18,21 +18,13 @@ jobs:
 
       - run: npm ci
 
-      - name: Example config must be valid YAML and load
-        run: |
-          cp config/tenant.example.yaml config/tenant.yaml
-          # The unedited example MUST fail validation — it is full of
-          # placeholders, and a passing preflight here would mean the
-          # validator had stopped catching them.
-          if node runner/preflight.mjs --offline; then
-            echo "::error::The unedited example config passed preflight. Placeholder validation has regressed."
-            exit 1
-          fi
-          echo "Unedited example correctly rejected."
-          rm config/tenant.yaml
+      - name: Host parses
+        run: node --check host/host.mjs
 
       - name: Tests
-        run: npm test --if-present
+        # test/guard-send.test.mjs is the release gate: it proves the approval
+        # guarantee still holds. A failure there is never flaky.
+        run: npm test
 
   # This repo was extracted from a private codebase. This job exists so that a
   # future commit cannot quietly reintroduce a real person, customer, internal
@@ -56,7 +48,7 @@ jobs:
           fi
           echo "No credential patterns found."
 
-      - name: Real .env or token files must never be committed
+      - name: Real .env or state files must never be committed
         run: |
           set +e
           BAD=$(git ls-files | grep -E '(^|/)\.env$|(^|/)\.env\.(local|production)$|-oauth\.json$|^state/' )
@@ -66,17 +58,3 @@ jobs:
             exit 1
           fi
           echo "No secret or state files tracked."
-
-      - name: Placeholders must stay placeholders
-        run: |
-          set +e
-          # Catch a real-looking id pasted into the example config, which is how
-          # a tenant's actual CRM list or user id would leak.
-          HITS=$(grep -nE '^\s*(list_id|provider_user_id|crm_owner_id):\s*"?[A-Za-z0-9_-]{6,}"?\s*$' \
-            config/tenant.example.yaml | grep -v '<' )
-          if [ -n "$HITS" ]; then
-            echo "::error::config/tenant.example.yaml contains what looks like a real id. Use a <PLACEHOLDER>:"
-            echo "$HITS"
-            exit 1
-          fi
-          echo "Example config contains only placeholders."

@@ -11,52 +11,47 @@ do with it. We will acknowledge within three business days.
 
 ## What this deployment exposes
 
-Deliberately, nothing.
+Deliberately, nothing. The host **binds no port, exposes no HTTP endpoint,
+receives no webhooks, and serves no dashboard.** It dials OUT to Slack over a
+WebSocket (Socket Mode), so there is nothing routable to your deployment — and
+a speaker's identity comes from Slack's authenticated envelope, not from a
+request body, which is what makes the operator allowlist meaningful.
 
-This agent runs as a scheduled job that starts, makes outbound calls, and exits.
-It **binds no port, exposes no HTTP endpoint, receives no webhooks, and serves
-no dashboard.** There is no inbound surface to authenticate, and therefore no
-unauthenticated endpoint to find.
+## The trust model, stated plainly
 
-That holds for real-time chat too. `npm run chat` is long-running, but it dials
-OUT to Slack over a WebSocket (Socket Mode) rather than accepting connections, so
-there is still nothing routable to your deployment — and the caller's identity
-comes from Slack's authenticated envelope rather than from a request body, which
-is what makes its allowlist meaningful.
+The agent is a full Claude Code session: it runs commands, edits this repo,
+and can read its own environment, including the credentials you gave it. The
+machine or container it runs on is **the agent's computer** — size what you
+hand it accordingly:
 
-If you ever add an actual listener, you are taking on an authentication problem
-this design does not currently have — read [docs/security.md](docs/security.md)
-before you do.
+- Give it its **own FirstTouch seat**, not a human's.
+- Scope the **HubSpot token** to the objects and verbs you actually want it
+  using; leave write scopes off until you want writes.
+- The Slack tokens are held by the host and stripped from the session's
+  environment — the agent works in the repo; the host owns the Slack surface.
 
-## Your credentials
+What the agent must NOT be able to do is not left to trust:
+[`.claude/hooks/guard-send.mjs`](.claude/hooks/guard-send.mjs) runs on every
+MCP tool call, in scheduled runs and chat alike, and denies direct sends,
+un-approved or un-owned outreach actions, self-approval, email sending, and
+flow authoring. It matches bare tool names (rename-proof), fails closed on
+anything unparseable, and its tests are a release gate.
 
-Every credential lives in the environment. `.env` is gitignored, and CI fails
-the build if a `.env`, a token file, or anything under `state/` is ever tracked.
+## Prospect and operator data
 
-Scope tokens to the minimum that works. The CRM token in particular should be
-read-only unless you have deliberately enabled CRM writes — the bundled CRM
-adapter refuses to write at all unless `CRM_WRITES_ENABLED=1`.
-
-## Prospect data
-
-`state/` contains real personal data about real people: names, employers,
-profile URLs, and the drafts written about them. It is gitignored. Treat that
-directory the way you would treat a CRM export, back it up accordingly, and
-delete from it when someone asks you to. See
-[docs/safety-and-compliance.md](docs/safety-and-compliance.md).
+`state/` holds the operator binding, thread→session pairings, and images the
+operator uploads. `workspace/` holds what the agent writes about prospects.
+Both can contain real personal data — treat them like a CRM export, back them
+up accordingly, and delete on request. `state/` is gitignored, and CI fails
+any commit that tracks a `.env`, a token file, or anything under `state/`.
 
 ## Prompt injection
 
-The agent reads text written by people who are not you — profile bios, company
-websites, CRM notes. That text can contain instructions aimed at the model.
-
-The primary mitigation is structural rather than clever: **the agent cannot write
-a message and send it.** Anything it composes waits for a human, so the worst
-realistic outcome on that path is a bad draft someone rejects.
-
-The flow-enrolment path is the exception worth understanding. Injected text
-cannot change what gets *said* there — the copy is yours and was published before
-the run — but it could influence *who* gets enrolled. That is why enrolment is
-limited to flows you declare in `flows:`, why the agent may never author or
-publish a flow, and why suppression and qualification carry more weight on that
-path than on the drafting path. Keep the flow list short and specific.
+The agent reads text written by people who are not you — bios, websites, CRM
+notes, and anything inside an image the operator forwards. That text can carry
+instructions aimed at the model. The primary mitigation is structural rather
+than clever: **the agent cannot put a message in front of a person.** Anything
+it composes waits in FirstTouch for a human, so the worst realistic outcome on
+that path is a bad draft someone rejects. The house rules additionally tell it
+to treat all third-party text as data, never instructions — but the guard, not
+the telling, is the control.
