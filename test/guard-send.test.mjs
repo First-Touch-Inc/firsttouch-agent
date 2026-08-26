@@ -102,11 +102,60 @@ test('a correctly gated, correctly owned action is allowed', () => {
 });
 
 // --- approving is the human's half -------------------------------------------
+// complete_task is permitted ONLY for task ids covered by a recorded human
+// Approve click — the record the host writes to state/approvals.json when a
+// button is pressed. No record, no completion.
 
-test('complete_task is blocked — the agent never approves its own work', () => {
-  const d = decide('mcp__firsttouch__complete_task', { taskId: 't1' });
-  assert.ok(denied(d));
-  assert.match(d.permissionDecisionReason, /human/i);
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+
+function withApprovals(records, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'approvals-'));
+  writeFileSync(join(dir, 'approvals.json'), JSON.stringify(records));
+  const saved = process.env.STATE_DIR;
+  process.env.STATE_DIR = dir;
+  try { return fn(); } finally {
+    if (saved === undefined) delete process.env.STATE_DIR; else process.env.STATE_DIR = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// decide() must pass the ambient env through so STATE_DIR reaches the hook.
+
+test('complete_task with no recorded approval is blocked', () => {
+  withApprovals({}, () => {
+    const d = decide('mcp__firsttouch__complete_task', { taskId: 't1' });
+    assert.ok(denied(d));
+    assert.match(d.permissionDecisionReason, /no human has approved/i);
+  });
+});
+
+test('complete_task is allowed for exactly the task ids a human approved', () => {
+  withApprovals({
+    abc: { status: 'approved', task_ids: ['t1', 't2'] },
+  }, () => {
+    assert.equal(decide('mcp__firsttouch__complete_task', { taskId: 't1' }), null);
+    assert.equal(decide('mcp__firsttouch__complete_task', { taskIds: ['t1', 't2'] }), null);
+    // A task outside the approved set is still blocked, even alongside an
+    // approved one — approval does not smear.
+    assert.ok(denied(decide('mcp__firsttouch__complete_task', { taskIds: ['t1', 't3'] })));
+  });
+});
+
+test('a pending or denied card approves nothing', () => {
+  withApprovals({
+    p: { status: 'pending', task_ids: ['t1'] },
+    d: { status: 'denied', task_ids: ['t2'] },
+  }, () => {
+    assert.ok(denied(decide('mcp__firsttouch__complete_task', { taskId: 't1' })));
+    assert.ok(denied(decide('mcp__firsttouch__complete_task', { taskId: 't2' })));
+  });
+});
+
+test('complete_task without a recognisable task id is blocked — it cannot be checked', () => {
+  withApprovals({ abc: { status: 'approved', task_ids: ['t1'] } }, () => {
+    assert.ok(denied(decide('mcp__firsttouch__complete_task', {})));
+  });
 });
 
 test('skipping and cancelling stay allowed — both are the safe direction', () => {

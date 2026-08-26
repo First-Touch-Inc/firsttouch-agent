@@ -11,7 +11,11 @@
     "first. Enforced in code rather than asked for in a prompt, because a",
     "prompt is guidance and a hook is a control. Removing it does not just",
     "relax a default — it makes the project's central promise false.",
-    "See .claude/hooks/guard-send.mjs."
+    "See .claude/hooks/guard-send.mjs.",
+    "",
+    "The deny rules draw the line under self-modification: the agent freely",
+    "edits its playbooks, schedules and CLAUDE.md — that is the product — but",
+    "never its own guardrails, the approval records, or the credential file."
   ],
 
   "hooks": {
@@ -26,6 +30,15 @@
           }
         ]
       }
+    ]
+  },
+
+  "permissions": {
+    "deny": [
+      "Edit(.claude/**)",
+      "Edit(state/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)"
     ]
   }
 }

@@ -17,11 +17,19 @@ agent:  … asks two clarifying questions, writes workspace/plays/outbound.md,
         adds a schedule, stages tomorrow's first drafts for your approval
 ```
 
-Every draft lands in FirstTouch as an approval task. You (or the teammate who
-owns it) approve, edit, or deny — nothing sends until then. That rule is not a
-prompt: it's a [hook](.claude/hooks/guard-send.mjs) that runs on every tool
-call the agent makes, and it is the same control FirstTouch runs on its own
-internal agents.
+Every draft becomes an approval card in Slack — the copy, the researched
+reason, Approve and Deny buttons — routed to whoever the outreach sends from.
+Approve and the agent completes the send through FirstTouch; deny (or reply in
+the thread with feedback) and it cancels, adjusts, and remembers why. Nothing
+sends until that click. The rule is not a prompt: it's a
+[hook](.claude/hooks/guard-send.mjs) that runs on every tool call the agent
+makes — the same control FirstTouch runs on its own internal agents — and the
+hook only unlocks a send for task ids a recorded human click covers.
+
+It also knows *who* is talking: every message carries the sender's Slack
+identity, which the agent maps to their FirstTouch seat and HubSpot owner. Ask
+it for outreach and it drafts as **you**; Michael asks and it drafts as
+Michael, with Michael's approval card.
 
 ## Setup (~15 minutes)
 
@@ -55,10 +63,12 @@ claude mcp add --transport http firsttouch https://mcp.firsttouch.ai
 Then run `claude`, type `/mcp`, and authorize FirstTouch. Claude Code owns
 that OAuth and refreshes it — the host never holds a platform credential.
 
-**4. Add HubSpot.**
-HubSpot → Settings → Integrations → Private Apps → create one with the CRM
-read scopes (add write scopes only if you want the agent updating records) →
-put the token in `.env` as `HUBSPOT_ACCESS_TOKEN`.
+**4. Add HubSpot** (either way works):
+- **API key:** HubSpot → Settings → Integrations → Private Apps → create one
+  with the CRM read scopes (write scopes only if you want the agent updating
+  records) → put the token in `.env` as `HUBSPOT_ACCESS_TOKEN`.
+- **Or the MCP:** `claude mcp add --transport http hubspot https://mcp.hubspot.com`
+  and authorize via `/mcp`, same as FirstTouch.
 
 **5. Run it.**
 ```bash
@@ -69,12 +79,18 @@ npm start
 The log prints a claim code. DM the bot that code in Slack — you're the
 operator. Then just talk to it.
 
-For a server, the same thing in Docker (set the tokens as env vars, mount a
-volume at `/app/state`):
+For a server: on **Railway**, create a service from your fork of this repo (it
+builds the Dockerfile), set the `.env` values as service variables, and mount
+a volume at `/app/state` — no public networking needed, the host dials out.
+The same works anywhere Docker runs:
 ```bash
 docker build -t firsttouch-agent . && docker run -d --restart unless-stopped \
   --env-file .env -v agent-data:/app/state firsttouch-agent
 ```
+(In a container there's no browser for the FirstTouch `/mcp` authorization —
+authorize once on your machine, then copy `~/.claude/.credentials.json` into
+the container's home dir, or run the MCP add + authorize inside a one-off
+interactive shell on the box.)
 
 ## What to say first
 
@@ -111,7 +127,7 @@ every MCP tool call in every session, scheduled or interactive, and denies:
 | Any email send | the agent drafts; a human sends |
 | `add_dynamic_action` without `isHumanApprovalRequired: true` | would send on creation |
 | `add_dynamic_action` without owner **and** assignee | approving would send from the wrong person's mailbox, irreversibly |
-| `complete_task` | approving is the human's half — the agent never approves its own work |
+| `complete_task` without a recorded human Approve click | the agent never approves its own work — the host records each click (Slack-authenticated identity) and the hook permits completing exactly those task ids |
 | Creating/editing/publishing flows | flow copy sends automatically, so a human authors it |
 
 Flow *enrolment* is allowed (published flows carry human-written copy); create
@@ -136,11 +152,15 @@ you actually want it doing, and treat the box as belonging to the agent.
   the answer.
 - Scheduled runs post their reports to the channel you chose, with the same
   narration.
-- Approvals happen in FirstTouch: each rep sees their own queue, edits or
-  denies with a reason, and the agent reads those edits back as feedback.
-- It can only hear the operator (whoever claimed it) plus anyone in
-  `ALLOWED_SLACK_USERS`. To hand it off, delete `state/operator.json` and
-  restart — a new claim code prints.
+- Approval cards land in each sender's channel with Approve/Deny buttons.
+  Clicking settles the card, wakes the agent, and it completes or cancels the
+  send — replying in the card's thread is how you give it feedback ("shorter",
+  "wrong persona"), and it keeps what it learns.
+- DMs and @mentions work for the operator (whoever claimed it) plus anyone in
+  `ALLOWED_SLACK_USERS`; replies in a card or report thread work for anyone in
+  that channel — membership in the approvals channel is the authorization. To
+  hand the agent off, delete `state/operator.json` and restart — a new claim
+  code prints.
 
 ## License
 

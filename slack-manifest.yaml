@@ -9,7 +9,17 @@
 #
 # Socket Mode means the agent DIALS OUT to Slack: no request URL, no public
 # endpoint, no inbound firewall rule. The interactivity block needs no URL for
-# the same reason.
+# the same reason — approval button clicks arrive over the same socket.
+#
+# The scope set matches what FirstTouch's own internal agents run with. The
+# ones that are easy to under-provision:
+#   - messages_tab_enabled: without it Slack BLOCKS DMs to the app entirely.
+#   - files:read: Slack file URLs are private; without this scope Slack serves
+#     a login page instead of the screenshot you sent.
+#   - channels:history / groups:history: without these the app never hears
+#     replies in approval-card threads, so feedback silently goes nowhere.
+#   - users:read.email: how the agent maps the person talking to their
+#     FirstTouch seat and HubSpot owner — who to send outreach from.
 
 display_information:
   name: FirstTouch Agent
@@ -20,10 +30,6 @@ features:
   bot_user:
     display_name: firsttouch-agent
     always_online: true
-  # The Messages tab is REQUIRED, not cosmetic: the claim code, onboarding and
-  # every chat turn happen in a DM. Without messages_tab_enabled Slack shows
-  # "Sending messages to this app has been turned off" and there is no way in
-  # at all — the app installs into a dead end.
   app_home:
     home_tab_enabled: false
     messages_tab_enabled: true
@@ -32,25 +38,32 @@ features:
 oauth_config:
   scopes:
     bot:
-      - chat:write           # post cards, digests, replies
-      - chat:write.customize # per-message persona name/avatar (motion badges)
-      - im:history           # DMs: onboarding, claim code, chat
+      - app_mentions:read    # @firsttouch-agent in channels
+      - channels:history     # hear replies in public-channel card threads
+      - channels:read        # resolve channel names/ids
+      - chat:write           # post cards, reports, replies
+      - chat:write.customize # per-message persona name/avatar
+      - files:read           # read screenshots people attach
+      - groups:history       # hear replies in private-channel card threads
+      - groups:read
+      - im:history           # DMs: the main conversation surface
       - im:read
       - im:write
-      - app_mentions:read    # @firsttouch-agent in channels
-      - channels:read        # validate the per-owner approvals channels
-      - groups:read
+      - mpim:history         # group DMs
+      - mpim:read
+      - reactions:read
       - reactions:write      # the 👀 acknowledgement
-      - users:read           # names for owner binding confirmations
-      - files:read           # read screenshots you attach — Slack file URLs are
-                             # private and need this scope; without it Slack
-                             # serves a login page instead of the image
+      - users:read           # who is talking
+      - users:read.email     # …and which FirstTouch/HubSpot user they are
 
 settings:
   event_subscriptions:
     bot_events:
       - app_mention
+      - message.channels
+      - message.groups
       - message.im
+      - message.mpim
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

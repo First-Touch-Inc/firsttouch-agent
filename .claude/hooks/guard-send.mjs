@@ -128,16 +128,46 @@ if (/^add_dynamic_action$/i.test(bare)) {
 
 // --- 5. Approving is the human's half ----------------------------------------
 // complete_task is how an approval task gets approved-and-executed. If the
-// agent could call it, it could approve its own drafts and the gate would be
-// decorative. Skipping and cancelling stay allowed — both are the safe
-// direction.
+// agent could call it freely, it could approve its own drafts and the gate
+// would be decorative.
+//
+// The ONE exception: a human clicked Approve on a Slack card. The host — not
+// the model — records that click (with a Slack-authenticated identity) in
+// state/approvals.json, and this check permits completing exactly the task ids
+// a recorded, still-approved card covers. The model cannot write that file
+// into effect by itself: it would have to fabricate a record, and the host
+// overwrites the file from its own state on every decision. Skipping and
+// cancelling stay allowed — both are the safe direction.
 if (/^complete_task$/i.test(bare)) {
-  deny(
-    `Blocked by the send guard: complete_task approves and executes a task, and ` +
-    `approving is the human's half of this system. The person it belongs to approves ` +
-    `it in FirstTouch. If they asked you to approve it for them, tell them it needs ` +
-    `their own click.`,
-  );
+  const here = dirname(fileURLToPath(import.meta.url));
+  const root = resolve(here, '..', '..');
+  const stateDir = process.env.STATE_DIR ? resolve(root, process.env.STATE_DIR) : join(root, 'state');
+  let approved = new Set();
+  try {
+    const records = JSON.parse(readFileSync(join(stateDir, 'approvals.json'), 'utf8'));
+    for (const card of Object.values(records)) {
+      if (card?.status === 'approved') for (const t of card.task_ids ?? []) approved.add(String(t));
+    }
+  } catch { /* no records → nothing is approved */ }
+
+  const referenced = [...flat.matchAll(/"(?:task_?ids?|taskIds)"\s*:\s*(?:"([^"]+)"|\[([^\]]*)\])/gi)]
+    .flatMap((m) => m[1] ? [m[1]] : String(m[2] ?? '').split(',').map((s) => s.replace(/["\s]/g, '')).filter(Boolean));
+  if (referenced.length === 0) {
+    deny(
+      `Blocked by the send guard: complete_task was called without a recognisable task id, ` +
+      `so it cannot be checked against recorded human approvals. Pass the task id explicitly.`,
+    );
+  }
+  const unapproved = referenced.filter((id) => !approved.has(id));
+  if (unapproved.length) {
+    deny(
+      `Blocked by the send guard: no human has approved task ${unapproved.join(', ')}. ` +
+      `Approving is the human's half of this system — post an approval card (POST ` +
+      `$HOST_API/slack/approval with these task_ids) and wait for the click, or let the ` +
+      `owner approve it in FirstTouch directly. Never ask anyone to work around this.`,
+    );
+  }
+  allow(); // every referenced task carries a recorded human approval
 }
 
 // --- 6. Flows: enrol yes, author no ------------------------------------------

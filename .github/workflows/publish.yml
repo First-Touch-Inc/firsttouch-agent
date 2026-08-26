@@ -1,12 +1,7 @@
-# Publish the engine image to GHCR on every version tag.
-#
-# This is what makes the overlay pattern real: a deployment-specific image
-# (ours included) is `FROM ghcr.io/first-touch-inc/firsttouch-agent:vX.Y.Z`
-# plus its own config and private adapters — never a fork of this repo.
-#
-# Tags are pinned versions on purpose. An overlay that tracks :latest gets
-# surprise engine changes; one that pins upgrades deliberately, reading the
-# release notes, the way we tell customers to.
+# Publish the image to GHCR on every version tag, so `docker run
+# ghcr.io/first-touch-inc/firsttouch-agent:vX.Y.Z` works without a local
+# build. Pinned versions on purpose: a deployment that tracks :latest gets
+# surprise changes; one that pins upgrades deliberately.
 
 name: publish
 on:

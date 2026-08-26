@@ -30,6 +30,15 @@ hand it accordingly:
 - The Slack tokens are held by the host and stripped from the session's
   environment — the agent works in the repo; the host owns the Slack surface.
 
+Self-modification is a feature with a drawn line: the agent freely edits its
+playbooks, schedules and its own instructions, but the permission rules deny
+it editing `.claude/` (its guardrails) and `state/` (the approval records),
+and the host is the only writer of a human approval. A fully adversarial
+model with shell access could still raise its own limits — the honest
+mitigations are that the repo is version-controlled (every self-edit is a
+diff), sends require FirstTouch tasks a human sees, and you sized the
+credentials you handed it.
+
 What the agent must NOT be able to do is not left to trust:
 [`.claude/hooks/guard-send.mjs`](.claude/hooks/guard-send.mjs) runs on every
 MCP tool call, in scheduled runs and chat alike, and denies direct sends,
