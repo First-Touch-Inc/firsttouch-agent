@@ -54,12 +54,15 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORK_DIR = process.env.WORK_DIR ? resolve(ROOT, process.env.WORK_DIR) : ROOT;
 if (WORK_DIR !== ROOT) {
   mkdirSync(WORK_DIR, { recursive: true });
-  for (const entry of ['CLAUDE.md', 'workspace', '.mcp.json', 'schedules.example.json']) {
+  for (const entry of ['CLAUDE.md', 'workspace', 'schedules.example.json']) {
     const src = join(ROOT, entry);
     if (!existsSync(src)) continue;
     cpSync(src, join(WORK_DIR, entry), { recursive: true, force: false, errorOnExist: false });
   }
+  // Rules, not memory: the guard and the MCP roster come from the image every
+  // boot. What the agent learns is its own; what it connects to is not.
   cpSync(join(ROOT, '.claude'), join(WORK_DIR, '.claude'), { recursive: true, force: true });
+  cpSync(join(ROOT, '.mcp.json'), join(WORK_DIR, '.mcp.json'), { recursive: true, force: true });
   if (!existsSync(join(WORK_DIR, '.git'))) {
     // Best-effort: the work dir is more auditable versioned, but git being
     // absent or unhappy must never stop the host.

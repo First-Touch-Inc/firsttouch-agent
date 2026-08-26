@@ -61,9 +61,12 @@ guide tool before your first use of a feature, every session where you need it:
 - `get_contact_discovery_guide` — before `discover_contacts` (filter rules:
   Alpha-2 country codes, bare domains, concise titles).
 
-HubSpot is a plain REST API: `HUBSPOT_ACCESS_TOKEN` is in your environment,
-`curl -H "Authorization: Bearer $HUBSPOT_ACCESS_TOKEN" https://api.hubapi.com/...`.
-Docs at developers.hubspot.com.
+HubSpot comes in one of two ways — check which you have before your first CRM
+step: if the `hubspot` MCP server is connected and authorized, use its tools.
+Otherwise `HUBSPOT_ACCESS_TOKEN` is in your environment and HubSpot is a plain
+REST API: `curl -H "Authorization: Bearer $HUBSPOT_ACCESS_TOKEN"
+https://api.hubapi.com/...`. Docs at developers.hubspot.com. If neither works,
+say so and ask the operator — never guess at CRM state.
 
 Skill packs — playbooks for common motions (founder-led outbound, warm-engager
 follow-up, stalled-deal reactivation, inbound speed-to-lead) — install into

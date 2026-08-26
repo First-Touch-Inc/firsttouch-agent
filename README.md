@@ -63,11 +63,12 @@ FirstTouch. Claude Code owns that OAuth and refreshes it — the host never
 holds a platform credential.
 
 **4. Add HubSpot** (either way works):
-- **API key:** HubSpot → Settings → Integrations → Private Apps → create one
-  with the CRM read scopes (write scopes only if you want the agent updating
-  records) → put the token in `.env` as `HUBSPOT_ACCESS_TOKEN`.
-- **Or the MCP:** `claude mcp add --transport http hubspot https://mcp.hubspot.com`
-  and authorize via `/mcp`, same as FirstTouch.
+- **OAuth, same as FirstTouch:** the repo registers HubSpot's MCP too — in the
+  same `/mcp` screen, authorize `hubspot` alongside `firsttouch`. One pass,
+  no token to manage.
+- **Or an access token:** HubSpot → Settings → Integrations → Private Apps →
+  create one with the CRM read scopes (write scopes only if you want the agent
+  updating records) → put the token in `.env` as `HUBSPOT_ACCESS_TOKEN`.
 
 **5. Run it.**
 ```bash
