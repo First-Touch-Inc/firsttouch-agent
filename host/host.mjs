@@ -541,8 +541,10 @@ function cardBlocks(card) {
   } else {
     const actor = card.decided_by?.id ? `<@${card.decided_by.id}>` : (card.decided_by?.name || 'someone');
     const label = card.status === 'denied' ? '❌ Denied'
+      : card.status === 'ft_approved' ? '✅ Approved in FirstTouch'
+      : card.status === 'ft_canceled' ? '❌ Canceled in FirstTouch'
       : card.edited_copy ? '✏️ Approved with edits' : '✅ Approved';
-    const link = card.status === 'approved' && ftUrl ? `\n🔗 <${ftUrl}|View in FirstTouch ↗>` : '';
+    const link = (card.status === 'approved' || card.status === 'ft_approved') && ftUrl ? `\n🔗 <${ftUrl}|View in FirstTouch ↗>` : '';
     blocks.push({
       type: 'context',
       elements: [{ type: 'mrkdwn', text: `${label} by ${actor} · ${card.decided_at || ''}${link}` }],
@@ -687,7 +689,32 @@ const api = createServer(async (req, res) => {
       const card = approvals[url.searchParams.get('id')];
       return card ? reply(200, card) : reply(404, { error: 'no such approval' });
     }
-    return reply(404, { error: 'unknown endpoint — POST /slack/approval, POST /slack/post, GET /slack/approval?id=…' });
+    if (req.method === 'POST' && url.pathname === '/slack/reconcile') {
+      // A human approved (or canceled) the surfaced task INSIDE FirstTouch;
+      // the reconcile session reports it here so the card stops lying.
+      // Deliberately NOT status "approved": the guard must never read a
+      // FirstTouch-side settle as permission to complete — that execution
+      // already happened inside FirstTouch. Worst case for a false report is
+      // a mis-labeled card a human can see, never an unlocked send.
+      const card = approvals[String(data.card_id || '')];
+      const result = String(data.result || '');
+      if (!card) return reply(404, { error: 'no such approval' });
+      if (card.status !== 'pending') return reply(409, { error: `already ${card.status}` });
+      if (!card.task_ids?.length) return reply(400, { error: 'card carries no FirstTouch task ids' });
+      if (result !== 'approved' && result !== 'canceled') return reply(400, { error: 'result must be "approved" or "canceled"' });
+      card.status = result === 'approved' ? 'ft_approved' : 'ft_canceled';
+      card.decided_by = { name: 'FirstTouch (in-app)' };
+      card.decided_at = new Date().toISOString();
+      saveApprovals();
+      await slack('chat.update', {
+        channel: card.channel, ts: card.ts,
+        text: `${card.status === 'ft_approved' ? '✅ Approved in FirstTouch' : '❌ Canceled in FirstTouch'} — ${card.title}`,
+        blocks: cardBlocks(card),
+      });
+      log(`reconcile: card ${card.id} settled as ${card.status}`);
+      return reply(200, { ok: true, status: card.status });
+    }
+    return reply(404, { error: 'unknown endpoint — POST /slack/approval, POST /slack/post, POST /slack/reconcile, GET /slack/approval?id=…' });
   } catch (e) {
     return reply(400, { error: e.message });
   }
@@ -839,9 +866,10 @@ async function handleInteraction(payload) {
   if (card.status !== 'pending') {
     // Someone clicked a settled card (Slack can race an update): tell them
     // quietly rather than double-driving the decision.
+    const STATUS_WORDS = { ft_approved: 'approved in FirstTouch', ft_canceled: 'canceled in FirstTouch' };
     await slack('chat.postEphemeral', {
       channel: card.channel, user: user.id,
-      text: `Already ${card.status} by ${card.decided_by?.name ?? 'someone'}.`,
+      text: `Already ${STATUS_WORDS[card.status] || card.status} by ${card.decided_by?.name ?? 'someone'}.`,
     }).catch(() => {});
     return;
   }
@@ -943,6 +971,40 @@ async function scheduleTick() {
   }
 }
 setInterval(() => scheduleTick(), 30_000);
+
+// --- FirstTouch-side approvals -----------------------------------------------
+// A human can also approve a surfaced task INSIDE FirstTouch — approving there
+// executes it there. The host holds no platform credential, so it cannot look
+// for itself; instead a periodic reconcile session checks the pending cards'
+// task ids and reports via POST /slack/reconcile. Those settles use the
+// distinct ft_approved / ft_canceled statuses, which the send guard reads as
+// nothing at all — bookkeeping, never authorization.
+let lastReconcile = 0;
+async function reconcileTick() {
+  if (running || queue.length) return; // human turns always come first
+  if (Date.now() - lastReconcile < 10 * 60e3) return;
+  const pendingWithTasks = Object.values(approvals)
+    .filter((c) => c.status === 'pending' && c.task_ids?.length)
+    .map((c) => ({ card_id: c.id, task_ids: c.task_ids }));
+  if (!pendingWithTasks.length) return;
+  lastReconcile = Date.now();
+  log(`reconcile: checking ${pendingWithTasks.length} pending card(s) against FirstTouch`);
+  const res = await enqueue({
+    prompt:
+      `[Reconcile pass — host-triggered; no human is watching and nothing should be posted to Slack.]\n` +
+      `These Slack approval cards are pending, each carrying FirstTouch task ids:\n` +
+      `${JSON.stringify(pendingWithTasks)}\n` +
+      `For each card, check its tasks with list_user_tasks (includeTeamTasks: true). ` +
+      `If ALL of a card's tasks were completed or approved inside FirstTouch, report it: ` +
+      `curl -s -X POST $HOST_API/slack/reconcile -d '{"card_id":"<id>","result":"approved"}'. ` +
+      `If ALL of them were canceled or removed, report result "canceled". ` +
+      `If tasks are still pending, or mixed, do nothing for that card. ` +
+      `Do not complete, edit or create anything in this pass. Reply with one short line saying what you reconciled.`,
+    timeoutMs: 5 * 60 * 1000,
+  });
+  log(`reconcile: ${res.result ? String(res.result).replace(/\s+/g, ' ').slice(0, 200) : res.error}`);
+}
+setInterval(() => reconcileTick().catch((e) => log(`reconcile error: ${e.message}`)), 60_000);
 
 // --- socket loop -------------------------------------------------------------
 async function connectSocket() {

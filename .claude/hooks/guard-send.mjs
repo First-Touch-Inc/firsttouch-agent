@@ -142,6 +142,10 @@ if (/^add_dynamic_action$/i.test(bare)) {
 // Recorded human approvals — the file the host writes when a button is
 // clicked, and the single source every approval-shaped gate reads: task
 // completion and flow publication alike.
+// Only status "approved" grants anything. A card settled as ft_approved —
+// because a human approved the surfaced task inside FirstTouch — is
+// bookkeeping: that execution already happened on the FirstTouch side, and it
+// must never unlock complete_task here.
 function approvedIds() {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = resolve(here, '..', '..');

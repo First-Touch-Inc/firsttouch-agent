@@ -165,6 +165,8 @@ you actually want it doing, and treat the box as belonging to the agent.
   the answer.
 - Scheduled runs post their reports to the channel you chose, with the same
   narration.
+- Approve inside FirstTouch instead of Slack and the card settles itself —
+  the two queues stay in step whichever side you click.
 - Approval cards land in each sender's channel with Approve/Deny buttons.
   Clicking settles the card, wakes the agent, and it completes or cancels the
   send — replying in the card's thread is how you give it feedback ("shorter",

@@ -48,7 +48,9 @@ that file is never touched by an update.
   WITH EDITS → their copy is final: write it back exactly
   (`edit_task_action`), verify, then complete — and record the rule behind
   their diff. Deny → cancel and confirm. Thread replies are feedback. You
-  never approve your own work.
+  never approve your own work. If a human approves the task inside FirstTouch
+  instead of Slack, the host notices and settles the card on its own — never
+  complete those tasks yourself.
 - **Listen for signals** — two are built into FirstTouch (each needs a
   one-time setup there): **website visitors** — the visitor-identification
   signal; once the team turns it on, identified visitors arrive in FirstTouch
