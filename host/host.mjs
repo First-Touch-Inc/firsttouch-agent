@@ -269,13 +269,11 @@ const speakerTag = (u) => u.lookupError
 function liveStatus(channel, thread) {
   const steps = [];
   let ts = null, timer = null, closed = false;
-  const render = () => {
-    const shown = steps.slice(-5);
-    const hidden = steps.length - shown.length;
-    return ['_working…_',
-      ...(hidden > 0 ? [`· _…${hidden} earlier step${hidden === 1 ? '' : 's'}_`] : []),
-      ...shown.map((s) => `· ${s}`)].join('\n');
-  };
+  // One line, updated in place — a ticker, not a log. The full step history
+  // stays in `steps` only to dedupe consecutive repeats.
+  const render = () => (steps.length
+    ? `_working…_  ·  ${steps[steps.length - 1]}`
+    : '_working…_');
   const started = slack('chat.postMessage', { channel, text: render(), thread_ts: thread })
     .then((r) => { if (r.ok) ts = r.ts; })
     .catch(() => {});
@@ -318,6 +316,7 @@ function describeStep(ev) {
     if (b?.type !== 'tool_use') continue;
     const raw = String(b.name ?? '');
     if (raw === 'TodoWrite') continue; // bookkeeping, not work
+    if (raw === 'Skill') return 'loading a playbook';
     if (raw === 'Bash') {
       const d = String(b.input?.description ?? '').trim();
       return d ? d.charAt(0).toLowerCase() + d.slice(1) : 'running a command';
