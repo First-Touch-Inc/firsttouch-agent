@@ -11,7 +11,8 @@
     "preflight": "node runner/preflight.mjs",
     "host": "node runner/host.mjs",
     "start": "node runner/host.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "ft-auth": "node runner/ft-auth-cli.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.241",

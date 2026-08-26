@@ -11,6 +11,7 @@
 // renamed upstream tool fails at boot, loudly, not mid-apply.
 
 import { connect } from './mcp-client.mjs';
+import { getAccessToken } from './ft-auth.mjs';
 
 const FT_URL = () => process.env.FT_MCP_URL || 'https://mcp.firsttouch.ai';
 
@@ -25,12 +26,26 @@ function parseJsonText(text, context) {
 
 /** The FirstTouch adapter: reads, enrichment, action staging and completion. */
 export async function firsttouchProvider({
-  token = process.env.FT_MCP_TOKEN,
+  token = null,
   dryRun = process.env.DRY_RUN === '1',
   connectImpl = connect,
+  getToken = getAccessToken,
 } = {}) {
-  if (!token) throw new Error('FT_MCP_TOKEN is not set — the FirstTouch adapter cannot start.');
-  let client = await connectImpl({ url: FT_URL(), token });
+  // Auth is EITHER a static FT_MCP_TOKEN (simple; the path once FirstTouch
+  // ships API keys) OR OAuth with a self-refreshing token on the volume. Both
+  // resolve through getAccessToken, so nothing below cares which is in use.
+  const resolveToken = async () => {
+    const t = token ?? await getToken();
+    if (!t) {
+      throw new Error(
+        'FirstTouch is not connected. Either set FT_MCP_TOKEN, or run `npm run ft-auth` ' +
+        'once to authorize (the agent then refreshes the token itself).',
+      );
+    }
+    return t;
+  };
+
+  let client = await connectImpl({ url: FT_URL(), token: await resolveToken() });
 
   // One long-lived session is reused for the host's lifetime. A server that
   // idle-kills the session, or a transient network drop, would otherwise fail
@@ -42,8 +57,11 @@ export async function firsttouchProvider({
       if (isError) throw new Error(`${name}: ${text.slice(0, 400)}`);
       return parseJsonText(text, name);
     } catch (e) {
-      if (/\b(session|connect|reach|respond|network|socket|ECONN|timed out|initialize)\b/i.test(e.message)) {
-        client = await connectImpl({ url: FT_URL(), token });
+      // A dead session OR an expired access token both look like a transport
+      // failure here. Reconnect with a FRESH token — which refreshes OAuth if
+      // it has expired — and retry once.
+      if (/\b(session|connect|reach|respond|network|socket|ECONN|timed out|initialize|rejected the token|401|403)\b/i.test(e.message)) {
+        client = await connectImpl({ url: FT_URL(), token: await resolveToken() });
         const { text, isError } = await client.callTool(name, args);
         if (isError) throw new Error(`${name}: ${text.slice(0, 400)}`);
         return parseJsonText(text, name);

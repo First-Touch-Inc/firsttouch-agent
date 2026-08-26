@@ -595,15 +595,29 @@ export function checkEnvironment({ dryRun = false } = {}) {
     });
   }
 
+  // FirstTouch auth is EITHER a static token OR a stored OAuth grant that the
+  // agent refreshes itself. Checked without importing ft-auth (which imports
+  // this module) — a token file with a refresh_token is the OAuth signal.
+  const ftOauthFile = process.env.FT_OAUTH_FILE
+    || join(resolveStateDir(), 'ft-oauth.json');
+  let ftOauth = false;
+  try {
+    if (existsSync(ftOauthFile)) {
+      const j = JSON.parse(readFileSync(ftOauthFile, 'utf8'));
+      ftOauth = Boolean(j.refresh_token || (j.access_token && Date.now() < (j.expires_at || 0)));
+    }
+  } catch { ftOauth = false; }
+  if (!ftOauth && process.env.FT_OAUTH_SEED) ftOauth = true; // hydrates on first boot
+
   checks.push({
     key: 'outreach platform',
-    ok: has('FT_MCP_TOKEN'),
+    ok: has('FT_MCP_TOKEN') || ftOauth,
     // In a dry run nothing is created, so the agent can research and draft
     // without platform credentials. Anywhere else this is fatal.
     fatal: !dryRun,
-    detail: has('FT_MCP_TOKEN')
-      ? 'FT_MCP_TOKEN is set'
-      : 'FT_MCP_TOKEN is not set. Required to create approval-gated actions.'
+    detail: has('FT_MCP_TOKEN') ? 'FT_MCP_TOKEN is set (static token)'
+      : ftOauth ? `FirstTouch OAuth token present (${ftOauthFile}) — the agent refreshes it itself`
+      : 'FirstTouch is not connected. Run `npm run ft-auth` once to authorize, or set FT_MCP_TOKEN.'
         + (dryRun ? ' Not fatal in a dry run — nothing will be created.' : ''),
   });
 
