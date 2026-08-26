@@ -165,8 +165,10 @@ you actually want it doing, and treat the box as belonging to the agent.
 
 ## Day-to-day
 
-- DM it like a colleague. Threads have real memory (each Slack thread is a
-  persistent Claude session) — start a new thread for a new topic.
+- DM it like a colleague. Threads have real memory (a DM is one continuous
+  session; each channel thread is its own) — start a new thread for a new
+  topic, and say `!reset` to start a surface's conversation fresh (its files
+  and notes stay).
 - While it works, one status message narrates what it's doing, then becomes
   the answer.
 - Scheduled runs post their reports to the channel you chose, with the same

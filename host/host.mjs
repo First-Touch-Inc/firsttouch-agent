@@ -126,6 +126,10 @@ const log = (...a) => console.log(`[host ${new Date().toISOString()}]`, ...a);
 // The work is judgement-heavy and a weaker model does not fail loudly — it
 // just drafts worse. Override with AGENT_MODEL if you have a reason to.
 const AGENT_MODEL = process.env.AGENT_MODEL || 'claude-opus-5';
+// Interactive turns can run a faster model than unwatched scheduled runs —
+// a human is staring at the ticker. Defaults to AGENT_MODEL; set
+// AGENT_MODEL_CHAT=claude-sonnet-5 to trade some drafting depth for snap.
+const CHAT_MODEL = process.env.AGENT_MODEL_CHAT || AGENT_MODEL;
 
 const TIMEZONE = process.env.AGENT_TZ
   || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -404,14 +408,14 @@ async function pump() {
  * a Slack thread IS a session, which is what makes multi-turn work without
  * any history-stitching here.
  */
-function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60 * 1000, preemptible = false }) {
+function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60 * 1000, preemptible = false, model = AGENT_MODEL }) {
   return new Promise((resolveTurn) => {
     // The prompt goes on STDIN, never argv: on Windows the CLI is spawned via
     // `cmd /c`, and cmd splits a command line at a newline — an argv prompt
     // delivered only its first line and silently dropped every flag after it.
     const args = [
       '-p',
-      '--model', AGENT_MODEL,
+      '--model', model,
       '--output-format', 'stream-json', '--verbose',
       // The session is trusted with its own machine — that is the product.
       // What it must not do is enforced by the PreToolUse send guard, which
@@ -821,6 +825,7 @@ async function handleTurn(text, channel, thread) {
   const res = await enqueue({
     prompt: text,
     key,
+    model: CHAT_MODEL,
     resume: sessions[key] ?? null,
     onProgress: (step) => status.note(step),
   });
@@ -883,6 +888,18 @@ async function handleEvent(ev) {
     return;
   }
   if (!text && !(ev.files?.length)) return;
+
+  // A bloated session is a slow session: `!reset` starts this surface fresh.
+  // Files (CLAUDE.md, workspace/, team notes) are untouched — only the
+  // conversation transcript link is dropped.
+  if (text.trim() === '!reset') {
+    const resetKey = resolveKey(ev.channel.startsWith('D') ? ev.channel : threadKey(ev.channel, thread));
+    delete sessions[resetKey];
+    writeState('sessions.json', sessions);
+    await say(ev.channel, 'Fresh session. My playbooks and team notes are intact — the conversation just starts new.',
+      ev.channel.startsWith('D') ? undefined : thread);
+    return;
+  }
 
   // Image attachments become local files the session reads with its own eyes.
   if (Array.isArray(ev.files) && ev.files.length) {

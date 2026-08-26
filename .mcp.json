@@ -3,10 +3,6 @@
     "firsttouch": {
       "type": "http",
       "url": "https://mcp.firsttouch.ai"
-    },
-    "hubspot": {
-      "type": "http",
-      "url": "https://mcp.hubspot.com"
     }
   }
 }
