@@ -342,9 +342,15 @@ function describeStep(ev) {
 // rate-limited chaos.
 const queue = [];
 let running = false;
+let currentChild = null, currentPreemptible = false;
 function enqueue(job) {
   return new Promise((resolveJob) => {
     queue.push({ ...job, resolveJob });
+    // A human never waits behind bookkeeping: if the running job is
+    // preemptible (the reconcile sweep), kill it — it retries on a later tick.
+    if (!job.preemptible && running && currentPreemptible) {
+      try { currentChild?.kill('SIGTERM'); } catch { /* already gone */ }
+    }
     pump();
   });
 }
@@ -363,7 +369,7 @@ async function pump() {
  * a Slack thread IS a session, which is what makes multi-turn work without
  * any history-stitching here.
  */
-function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60 * 1000 }) {
+function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60 * 1000, preemptible = false }) {
   return new Promise((resolveTurn) => {
     // The prompt goes on STDIN, never argv: on Windows the CLI is spawned via
     // `cmd /c`, and cmd splits a command line at a newline — an argv prompt
@@ -393,6 +399,8 @@ function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60
       : spawn('claude', args, { cwd: WORK_DIR, env, stdio });
     child.stdin.on('error', () => {});
     child.stdin.end(prompt);
+    currentChild = child;
+    currentPreemptible = preemptible;
 
     let out = '', err = '', pending = '', final = null, sessionId = resume, killed = false;
     const timer = setTimeout(() => { killed = true; try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
@@ -416,6 +424,8 @@ function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60
     child.on('error', (e) => { clearTimeout(timer); resolveTurn({ error: e.message }); });
     child.on('close', (code) => {
       clearTimeout(timer);
+      currentChild = null;
+      currentPreemptible = false;
       if (killed) return resolveTurn({ error: 'the session hit its time limit' });
       const parsed = final ?? parseModelOutput(out);
       if (parsed) return resolveTurn({ result: parsed.result ?? '', sessionId });
@@ -753,7 +763,12 @@ const sessions = readState('sessions.json', {});
 const threadKey = (channel, thread) => `${channel}:${thread}`;
 
 async function handleTurn(text, channel, thread) {
-  const key = threadKey(channel, thread);
+  // A DM (channel id D…) is ONE continuous session, whatever message you
+  // reply to: top-level DM messages carry fresh timestamps, and keying
+  // sessions on them made every message a cold start — full CLI boot, both
+  // MCP handshakes, no memory of the conversation ("thinking forever" on the
+  // simplest ask). Channels keep per-thread sessions.
+  const key = channel.startsWith('D') ? channel : threadKey(channel, thread);
   const status = liveStatus(channel, thread);
   const res = await enqueue({
     prompt: text,
@@ -999,7 +1014,8 @@ async function reconcileTick() {
       `If ALL of them were canceled or removed, report result "canceled". ` +
       `If tasks are still pending, or mixed, do nothing for that card. ` +
       `Do not complete, edit or create anything in this pass. Reply with one short line saying what you reconciled.`,
-    timeoutMs: 5 * 60 * 1000,
+    timeoutMs: 3 * 60 * 1000,
+    preemptible: true, // a human's message kills this instantly; it retries later
   });
   log(`reconcile: ${res.result ? String(res.result).replace(/\s+/g, ' ').slice(0, 200) : res.error}`);
 }
