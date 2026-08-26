@@ -156,6 +156,15 @@ if (typeof WebSocket === 'undefined') {
   process.exit(2);
 }
 
+// Slack's app manifest cannot carry an icon — the app-profile avatar is a
+// manual upload. But chat:write.customize (in the manifest) lets every
+// message wear one, and messages are the surface people actually see. So the
+// agent posts with the FirstTouch mark by default. AGENT_ICON_URL overrides;
+// set it to an empty string to use the app's uploaded avatar instead.
+const DEFAULT_ICON = 'https://cdn.prod.website-files.com/6686cf67c6204e07ccbbd28f/66a2259bcaae3485bccbafeb_Frame%20223%20(1)%20(1).png';
+const BOT_ICON = process.env.AGENT_ICON_URL === '' ? null : (process.env.AGENT_ICON_URL || DEFAULT_ICON);
+const withIcon = (payload) => (BOT_ICON ? { ...payload, icon_url: BOT_ICON } : payload);
+
 // --- tiny JSON state files ---------------------------------------------------
 function readState(name, fallback) {
   try { return JSON.parse(readFileSync(join(STATE_DIR, name), 'utf8')); } catch { return fallback; }
@@ -213,10 +222,10 @@ async function say(channel, text, thread_ts) {
   for (const part of chunks(text)) {
     // No unfurls: a LinkedIn URL in a report or card thread must not balloon
     // into a preview box under the message.
-    const r = await slack('chat.postMessage', {
+    const r = await slack('chat.postMessage', withIcon({
       channel, text: toSlackMrkdwn(part), thread_ts,
       unfurl_links: false, unfurl_media: false,
-    });
+    }));
     first ??= r;
   }
   return first;
@@ -274,7 +283,7 @@ function liveStatus(channel, thread) {
   const render = () => (steps.length
     ? `_working…_  ·  ${steps[steps.length - 1]}`
     : '_working…_');
-  const started = slack('chat.postMessage', { channel, text: render(), thread_ts: thread })
+  const started = slack('chat.postMessage', withIcon({ channel, text: render(), thread_ts: thread }))
     .then((r) => { if (r.ok) ts = r.ts; })
     .catch(() => {});
   const flush = async () => {
@@ -581,12 +590,12 @@ async function postApprovalCard({
     legacy_body: legacyBody ? legacyBody.slice(0, 1000) + (clipped ? '\n_…full draft in this thread._' : '') : '',
     status: 'pending', created_at: new Date().toISOString(),
   };
-  const res = await slack('chat.postMessage', {
+  const res = await slack('chat.postMessage', withIcon({
     channel,
     text: `Approval needed: ${title}`,
     unfurl_links: false, unfurl_media: false,
     blocks: cardBlocks(record),
-  });
+  }));
   if (!res.ok) return { error: `Slack refused the card: ${res.error}` };
   record.ts = res.ts;
   // The thread carries the document — host-posted, so it is always complete

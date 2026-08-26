@@ -49,6 +49,12 @@ app without it, and DMs are how you talk to the agent) and requests
 **`files:read`** (so the agent can look at screenshots you send — without the
 scope, Slack serves a login page instead of the image).
 
+Slack manifests can't carry an app icon, so the agent's messages brand
+themselves with the FirstTouch mark automatically (`AGENT_ICON_URL` overrides
+it; set it empty to use the app's own avatar). For the avatar shown in the
+sidebar and app profile, upload a logo once under **Basic Information →
+Display Information**.
+
 **2. Give it a model.**
 On a machine where you're logged in to Claude: `claude setup-token` → put the
 token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`. (Or set `ANTHROPIC_API_KEY` for
