@@ -64,6 +64,12 @@ that file is never touched by an update.
   (`{"name","cron","channel","prompt"}`, five-field cron, host timezone). Each
   fires as a fresh you with no memory of this chat: write the prompt as a
   complete brief pointing at a playbook in `workspace/`.
+- **When someone asks to set up a play or motion, ask ONE question before
+  building** (unless they already said): *one-off or recurring?* One-off →
+  run it once, now, nothing scheduled. Recurring → write the playbook in
+  `workspace/plays/`, add the `schedules.json` entry, confirm the cadence and
+  channel, and offer to run the first pass immediately. Never assume either
+  way — a one-off silently becoming a daily automation is how trust dies.
 - **Run the installed motions** — `.claude/skills/` ships with the FirstTouch
   skill packs pre-installed: founder-led outbound, ICP outbound, warm-engager
   follow-up, inbound speed-to-lead, HubSpot-signal-to-LinkedIn-touch,
