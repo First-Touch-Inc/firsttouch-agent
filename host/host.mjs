@@ -628,17 +628,10 @@ async function postApprovalCard({
   }));
   if (!res.ok) return { error: `Slack refused the card: ${res.error}` };
   record.ts = res.ts;
-  // The thread carries the document — host-posted, so it is always complete
-  // and always the same shape. (say() converts Markdown, so raw goes in.)
-  if (structured) {
-    const rawQuote = (s) => String(s).split('\n').map((l) => `> ${l}`).join('\n');
-    const detail = steps.map((s, i) =>
-      `**Step ${i + 1} — ${s.label || ''}**${s.subject ? `\nSubject: ${s.subject}` : ''}\n${rawQuote(s.copy || '')}`,
-    ).join('\n\n');
-    await say(channel, (sender ? `Sender: ${sender}\n` : '') + (research ? `_${String(research)}_\n\n` : '') + detail, res.ts);
-  } else if (clipped) {
-    await say(channel, legacyBody, res.ts);
-  }
+  // No auto-threaded copy of the steps — Review/Edit already shows every
+  // field (Jared: "it's already available if I click review/edit"). Only a
+  // legacy prose card overflows into its thread, having nowhere else to go.
+  if (clipped) await say(channel, legacyBody, res.ts);
   record.copy = String(copy || (structured
     ? steps.map((s, i) => `--- STEP ${i + 1}${s.label ? ` — ${s.label}` : ''} ---\n${s.copy || ''}`).join('\n\n')
     : '')).slice(0, 2900);
