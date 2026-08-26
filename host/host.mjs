@@ -981,14 +981,20 @@ async function handleInteraction(payload) {
       ...(card.steps?.length
         ? card.steps.flatMap((s, i) => [
           ...(s.subject ? [{
-            type: 'input', block_id: `subj_${i}`,
+            type: 'input', block_id: `subj_${i}`, optional: true,
             label: { type: 'plain_text', text: `${stepLabel(s, i)} — Subject` },
             element: { type: 'plain_text_input', action_id: 'value', multiline: false, initial_value: trunc(s.subject, 2900) },
           }] : []),
           {
-            type: 'input', block_id: `step_${i}`,
+            // optional + no placeholder-filling: a genuinely blank step (a
+            // no-note connection request) shows a blank field and submits
+            // blank — the field holds exactly what sends, nothing else.
+            type: 'input', block_id: `step_${i}`, optional: true,
             label: { type: 'plain_text', text: stepLabel(s, i) },
-            element: { type: 'plain_text_input', action_id: 'value', multiline: true, initial_value: trunc(s.copy || '', 2900) },
+            element: {
+              type: 'plain_text_input', action_id: 'value', multiline: true,
+              ...(s.copy ? { initial_value: trunc(s.copy, 2900) } : {}),
+            },
           },
         ])
         : [{

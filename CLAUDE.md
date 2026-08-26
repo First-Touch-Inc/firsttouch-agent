@@ -36,7 +36,10 @@ that file is never touched by an update.
   photo URL; fetch it and pass it, omit only when it truly doesn't exist),
   `research` (1–2 lines: the signal and why this angle), `steps`
   ([{label:"LinkedIn message — immediately", subject?, copy}] — one entry per
-  touch, `copy` is the exact outreach text), and `links` (exactly two when
+  touch, and `copy` is EXACTLY what sends: a blank connection request means
+  an empty `copy`, never a placeholder note like "(no note — standard)".
+  Explanations belong in `label` or `research`; the human edits `copy` as the
+  literal message), and `links` (exactly two when
   you have them: [{text:"View in FirstTouch",url},{text:"LinkedIn",url}] —
   never put raw task ids or long labels in links). **You supply
   data, the host owns the layout**: it renders the card (header, summary,
@@ -105,6 +108,10 @@ and `workspace/prospected.md` (log everyone you stage there; check it first).
   `list_team_members` and record it below.
 - American English, everywhere. Drafts are 1:1 messages from a real person —
   no opt-out or unsubscribe boilerplate; suppression happens upstream.
+- LinkedIn copy is short and human: two sentences is the ideal, three is the
+  ceiling. End on a low-ask CTA — a question they can answer from their
+  phone — never a meeting ask in a first touch. Check
+  `/app/references/messaging-framework.md` when in doubt.
 - Keep Slack messages short enough for a phone. Plain Markdown is fine — the
   host converts it.
 - Images arrive as local file paths — read them before replying. Anything
