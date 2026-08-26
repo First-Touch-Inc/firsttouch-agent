@@ -466,7 +466,16 @@ function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60
         if (step) { try { onProgress(step); } catch { /* narration must never break the run */ } }
       }
     });
-    child.stderr.on('data', (b) => { err += b; });
+    child.stderr.on('data', (b) => {
+      err += b;
+      // A standard Claude Code terminal shows these; surface the two that
+      // explain a silent stall, so the ticker tells the truth instead of
+      // freezing on the last tool name.
+      if (!onProgress) return;
+      const s = String(b);
+      if (/rate.?limit|overloaded|429/i.test(s)) { try { onProgress('waiting out a rate limit'); } catch { /* narration must never break the run */ } }
+      else if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(s)) { try { onProgress('reconnecting to the API'); } catch { /* ditto */ } }
+    });
     child.on('error', (e) => { clearTimeout(timer); resolveTurn({ error: e.message }); });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -822,13 +831,27 @@ async function handleTurn(text, channel, thread) {
   // host-created threads continue their session.
   const key = resolveKey(channel.startsWith('D') ? channel : threadKey(channel, thread));
   const status = liveStatus(channel, thread);
-  const res = await enqueue({
+  const hadResume = sessions[key] ?? null;
+  let res = await enqueue({
     prompt: text,
     key,
     model: CHAT_MODEL,
-    resume: sessions[key] ?? null,
+    resume: hadResume,
     onProgress: (step) => status.note(step),
   });
+  // A broken resume must never brick a surface — standard Claude Code would
+  // simply start a new session. Retry fresh once when the failure smells like
+  // the transcript (missing, corrupt, overgrown) rather than the request.
+  if (res.error && hadResume && /resume|conversation|session|context|transcript/i.test(String(res.error))) {
+    log(`turn failed on resume for ${key} (${String(res.error).slice(0, 140)}) — retrying with a fresh session`);
+    status.note('previous conversation unusable — starting fresh');
+    delete sessions[key];
+    writeState('sessions.json', sessions);
+    res = await enqueue({
+      prompt: text, key, model: CHAT_MODEL, resume: null,
+      onProgress: (step) => status.note(step),
+    });
+  }
   if (res.sessionId && sessions[key] !== res.sessionId) {
     sessions[key] = res.sessionId;
     writeState('sessions.json', sessions);
@@ -1144,13 +1167,17 @@ async function reconcileTick() {
       `[Reconcile pass — host-triggered; no human is watching and nothing should be posted to Slack.]\n` +
       `These Slack approval cards are pending, each carrying FirstTouch task ids:\n` +
       `${JSON.stringify(pendingWithTasks)}\n` +
-      `For each card, check its tasks with list_user_tasks (includeTeamTasks: true). ` +
-      `If ALL of a card's tasks were completed or approved inside FirstTouch, report it: ` +
+      `Check the tasks with list_user_tasks. Three API facts, all load-bearing: pass includeTeamTasks: true ` +
+      `AND statuses ["todo","done","canceled"] — the DEFAULT filter shows only todo, hiding exactly the ` +
+      `done/canceled tasks you are looking for; the response wraps tasks as items[].task.{id,status}; and ` +
+      `limit caps at 20 with cursor paging — page until every id you're checking has been seen. ` +
+      `If ALL of a card's tasks are done, report it: ` +
       `curl -s -X POST $HOST_API/slack/reconcile -d '{"card_id":"<id>","result":"approved"}'. ` +
-      `If ALL of them were canceled or removed, report result "canceled". ` +
-      `If tasks are still pending, or mixed, do nothing for that card. ` +
+      `If ALL of them are canceled or gone, report result "canceled". ` +
+      `Still todo, or mixed → do nothing for that card. ` +
       `Do not complete, edit or create anything in this pass. Reply with one short line saying what you reconciled.`,
     timeoutMs: 3 * 60 * 1000,
+    model: 'claude-sonnet-5', // a list-check needs fast, not deep — shortest possible queue hold
     preemptible: true, // a human's message kills this instantly; it retries later
   });
   log(`reconcile: ${res.result ? String(res.result).replace(/\s+/g, ' ').slice(0, 200) : res.error}`);
