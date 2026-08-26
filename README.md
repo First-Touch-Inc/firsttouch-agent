@@ -179,9 +179,11 @@ you actually want it doing, and treat the box as belonging to the agent.
   Clicking settles the card, wakes the agent, and it completes or cancels the
   send — replying in the card's thread is how you give it feedback ("shorter",
   "wrong persona"), and it keeps what it learns.
-- DMs and @mentions work for the operator (whoever claimed it) plus anyone in
-  `ALLOWED_SLACK_USERS`; replies in a card or report thread work for anyone in
-  that channel — membership in the approvals channel is the authorization. To
+- In channels the agent only answers **@mentions** — including in card and
+  report threads, where people also talk to each other. DMs need no mention.
+  Who may talk: the operator and `ALLOWED_SLACK_USERS` anywhere; anyone in
+  the channel when @mentioning inside a card or report thread — membership in
+  the approvals channel is the authorization. To
   hand the agent off, delete `state/operator.json` and restart — a new claim
   code prints.
 

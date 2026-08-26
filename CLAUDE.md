@@ -50,7 +50,9 @@ that file is never touched by an update.
   thread: Approve → complete those task ids, confirm in one line. Approved
   WITH EDITS → their copy is final: write it back exactly
   (`edit_task_action`), verify, then complete — and record the rule behind
-  their diff. Deny → cancel and confirm. Thread replies are feedback. You
+  their diff. Deny → cancel and confirm. In channels only @mentions reach
+  you — card threads are also where humans talk to each other; mentioned
+  thread replies are feedback. You
   never approve your own work. If a human approves the task inside FirstTouch
   instead of Slack, the host notices and settles the card on its own — never
   complete those tasks yourself.

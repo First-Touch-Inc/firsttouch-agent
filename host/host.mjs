@@ -793,6 +793,7 @@ await new Promise((res) => {
 });
 
 // --- operator + identity -----------------------------------------------------
+let BOT_USER_ID = null; // set at auth.test; channel messages must @mention it
 let operator = readState('operator.json', {}).userId
   || process.env.OPERATOR_SLACK_ID || null;
 const EXTRA_USERS = new Set((process.env.ALLOWED_SLACK_USERS || '')
@@ -802,6 +803,7 @@ let claimCode = null;
 {
   const auth = await slack('auth.test', {});
   if (!auth.ok) { console.error('auth.test failed — check SLACK_BOT_TOKEN.'); process.exit(2); }
+  BOT_USER_ID = auth.user_id;
   log(`Slack identity: ${auth.user_id} in ${auth.team}`);
   if (!operator) {
     claimCode = `${Math.floor(100 + Math.random() * 900)}-${Math.floor(100 + Math.random() * 900)}`;
@@ -905,7 +907,14 @@ async function handleEvent(ev) {
       || aliases[threadKey(ev.channel, ev.thread_ts)]
       || Object.values(approvals).some((c) => c.channel === ev.channel && c.ts === ev.thread_ts));
   const trustedSpeaker = ev.user === operator || EXTRA_USERS.has(ev.user);
-  if (isChannelMsg && ev.type !== 'app_mention' && !knownThread) return; // ambient channel chatter
+  // In channels — including threads the agent owns — only an @mention is FOR
+  // the agent: several humans discuss a card or report in the same thread,
+  // and eavesdropping on their conversation would be both noisy and wrong.
+  // (Checked on text too, because Slack may deliver the plain message event
+  // before its app_mention twin and the dedupe keeps whichever came first.)
+  const mentioned = ev.type === 'app_mention'
+    || (BOT_USER_ID && String(ev.text || '').includes(`<@${BOT_USER_ID}>`));
+  if ((isChannelMsg || ev.type === 'app_mention') && !mentioned) return;
   if (!knownThread && !trustedSpeaker) {
     log(`ignored message from ${ev.user} (not the operator; add them via ALLOWED_SLACK_USERS)`);
     return;
