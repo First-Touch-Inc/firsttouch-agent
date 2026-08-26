@@ -587,7 +587,7 @@ async function handleEvent(ev) {
       writeState('operator.json', { userId: ev.user });
       claimCode = null;
       await say(ev.channel,
-        `You're the operator now. I'm your FirstTouch agent — tell me what you want ` +
+        `You're the operator now. I'm your sales agent — tell me what you want ` +
         `running and I'll build it. A good place to start: tell me who's on the team, ` +
         `which HubSpot list or accounts to work, and what you want to happen daily.`);
     } else {
