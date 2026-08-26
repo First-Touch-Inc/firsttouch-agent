@@ -15,8 +15,14 @@
     "",
     "The deny rules draw the line under self-modification: the agent freely",
     "edits its playbooks, schedules and CLAUDE.md — that is the product — but",
-    "never its own guardrails, the approval records, or the credential file."
+    "never its own guardrails, the approval records, or the credential file.",
+    "",
+    "enableAllProjectMcpServers trusts the repo's own .mcp.json (the",
+    "FirstTouch server) so headless sessions get it without a per-machine",
+    "approval step. The guard runs on every one of those tools regardless."
   ],
+
+  "enableAllProjectMcpServers": true,
 
   "hooks": {
     "PreToolUse": [

@@ -57,11 +57,10 @@ leave both unset.) Sessions run on **Opus 5** by default — the work is
 judgement, and a weaker model doesn't fail loudly, it just drafts worse.
 
 **3. Connect FirstTouch.**
-```bash
-claude mcp add --transport http firsttouch https://mcp.firsttouch.ai
-```
-Then run `claude`, type `/mcp`, and authorize FirstTouch. Claude Code owns
-that OAuth and refreshes it — the host never holds a platform credential.
+The repo already registers the FirstTouch MCP ([`.mcp.json`](.mcp.json)) —
+nothing to add. In the repo folder, run `claude`, type `/mcp`, and authorize
+FirstTouch. Claude Code owns that OAuth and refreshes it — the host never
+holds a platform credential.
 
 **4. Add HubSpot** (either way works):
 - **API key:** HubSpot → Settings → Integrations → Private Apps → create one
@@ -80,17 +79,26 @@ The log prints a claim code. DM the bot that code in Slack — you're the
 operator. Then just talk to it.
 
 For a server: on **Railway**, create a service from your fork of this repo (it
-builds the Dockerfile), set the `.env` values as service variables, and mount
-a volume at `/app/state` — no public networking needed, the host dials out.
-The same works anywhere Docker runs:
+builds the Dockerfile), mount a **volume at `/data`**, and set the `.env`
+values as service variables — no public networking needed, the host dials out.
+The volume is the agent's disk: its memory (`CLAUDE.md`, `workspace/`,
+schedules), its session transcripts and the approval records all live there,
+so redeploys update the code without giving the agent amnesia.
+
+A container has no browser for the FirstTouch `/mcp` authorization, so do it
+once on your machine (step 3), then:
+```bash
+npm run seed
+```
+and set the printed value as `CLAUDE_CREDENTIALS_SEED` on the service — the
+host hydrates it on first boot. The same works anywhere Docker runs:
 ```bash
 docker build -t firsttouch-agent . && docker run -d --restart unless-stopped \
-  --env-file .env -v agent-data:/app/state firsttouch-agent
+  --env-file .env -v agent-data:/data firsttouch-agent
 ```
-(In a container there's no browser for the FirstTouch `/mcp` authorization —
-authorize once on your machine, then copy `~/.claude/.credentials.json` into
-the container's home dir, or run the MCP add + authorize inside a one-off
-interactive shell on the box.)
+Inside the container the host runs as a non-root user, and the send guard is
+re-synced from the image on every boot: the volume holds what the agent has
+learned, the image holds its rules.
 
 ## What to say first
 

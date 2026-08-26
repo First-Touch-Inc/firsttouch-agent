@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node host/host.mjs",
     "host": "node host/host.mjs",
+    "seed": "node scripts/seed-credentials.mjs",
     "test": "node --test"
   },
   "dependencies": {

@@ -19,6 +19,8 @@
 //   - download image attachments so the session can read them
 //   - convert Markdown to Slack's mrkdwn at the wire
 //   - fire the schedules the agent writes for itself in schedules.json
+//   - in a container, keep the agent's memory on the volume (WORK_DIR) and
+//     re-seal the guard from the image on every boot
 //
 // If you are reading this to find the safety controls: they are not here.
 // They are in .claude/hooks/guard-send.mjs, which runs inside every session
@@ -28,20 +30,68 @@
 // record, from a click identity Slack authenticated.
 
 import './lib/env.mjs'; // MUST be first: populates process.env from .env
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, cpSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { toSlackMrkdwn } from './lib/slack-mrkdwn.mjs';
 import { parseModelOutput } from './lib/model-output.mjs';
 import { parseCron, dueSchedules } from './lib/cron.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+// Where the agent lives. Locally that is this repo, and none of this block
+// runs. In a container it is a directory on the mounted volume
+// (WORK_DIR=/data/agent), because CLAUDE.md, the workspace, schedules and
+// state are the agent's MEMORY and the image is replaced on every deploy —
+// without this, each redeploy shipped an agent with amnesia. The work dir is
+// seeded from the image once; the guard (.claude/) is re-synced from the image
+// on EVERY boot, so control updates ship and a tampered copy heals. Code stays
+// in the image: the volume holds what the agent learned, never what it runs.
+const WORK_DIR = process.env.WORK_DIR ? resolve(ROOT, process.env.WORK_DIR) : ROOT;
+if (WORK_DIR !== ROOT) {
+  mkdirSync(WORK_DIR, { recursive: true });
+  for (const entry of ['CLAUDE.md', 'workspace', '.mcp.json', 'schedules.example.json']) {
+    const src = join(ROOT, entry);
+    if (!existsSync(src)) continue;
+    cpSync(src, join(WORK_DIR, entry), { recursive: true, force: false, errorOnExist: false });
+  }
+  cpSync(join(ROOT, '.claude'), join(WORK_DIR, '.claude'), { recursive: true, force: true });
+  if (!existsSync(join(WORK_DIR, '.git'))) {
+    // Best-effort: the work dir is more auditable versioned, but git being
+    // absent or unhappy must never stop the host.
+    const git = (...args) => spawnSync('git', args, { cwd: WORK_DIR, stdio: 'ignore' });
+    git('init');
+    git('add', '-A');
+    git('-c', 'user.email=agent@firsttouch.local', '-c', 'user.name=FirstTouch Agent',
+      'commit', '-m', 'Initial workspace (seeded from image)');
+  }
+}
+
+// A container has no browser for the FirstTouch /mcp authorization, so the
+// grant happens on the installer's machine and travels here as an env var:
+// `npm run seed` prints ~/.claude/.credentials.json base64-encoded. Hydrated
+// only when the file is missing — once the agent's home holds real (and since
+// refreshed) credentials, those win over a stale seed.
+if (process.env.CLAUDE_CREDENTIALS_SEED) {
+  const credFile = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(credFile)) {
+    try {
+      mkdirSync(dirname(credFile), { recursive: true });
+      writeFileSync(credFile, Buffer.from(process.env.CLAUDE_CREDENTIALS_SEED.trim(), 'base64'), { mode: 0o600 });
+      console.log('[host] seeded ~/.claude/.credentials.json from CLAUDE_CREDENTIALS_SEED');
+    } catch (e) {
+      console.error(`[host] could not seed credentials: ${e.message}`);
+    }
+  }
+}
+
 const STATE_DIR = process.env.STATE_DIR
-  ? resolve(ROOT, process.env.STATE_DIR)
-  : join(ROOT, 'state');
+  ? resolve(WORK_DIR, process.env.STATE_DIR)
+  : join(WORK_DIR, 'state');
 mkdirSync(STATE_DIR, { recursive: true });
 
 const log = (...a) => console.log(`[host ${new Date().toISOString()}]`, ...a);
@@ -58,8 +108,23 @@ const TIMEZONE = process.env.AGENT_TZ
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const APP_TOKEN = process.env.SLACK_APP_TOKEN;
 if (!BOT_TOKEN || !APP_TOKEN) {
-  console.error('The host needs SLACK_BOT_TOKEN (xoxb-…) and SLACK_APP_TOKEN (xapp-…, connections:write). See .env.example.');
+  const msg = 'The host needs SLACK_BOT_TOKEN (xoxb-…) and SLACK_APP_TOKEN (xapp-…, connections:write). See .env.example.';
+  // On a platform (Railway sets RAILWAY_ENVIRONMENT), missing variables are a
+  // setup step in progress, not a crash — park and say so, instead of
+  // crash-looping through fifty restarts while someone reads the README.
+  // Saving service variables triggers a redeploy, which re-runs this check.
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.WAIT_FOR_CONFIG) {
+    log(msg);
+    log('Waiting for configuration — set the Slack variables on the service; the redeploy picks them up.');
+    setInterval(() => log('still waiting for SLACK_BOT_TOKEN / SLACK_APP_TOKEN…'), 10 * 60e3);
+    await new Promise(() => {}); // parked until the platform restarts us
+  }
+  console.error(msg);
   process.exit(2);
+}
+if ((process.env.RAILWAY_ENVIRONMENT || process.env.WAIT_FOR_CONFIG)
+  && !process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_API_KEY) {
+  log('WARNING: neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set — every session will fail until one is. `claude setup-token` on your machine mints the subscription token.');
 }
 if (typeof WebSocket === 'undefined') {
   console.error(`The host needs Node 22+ (this is ${process.version}).`);
@@ -262,11 +327,12 @@ function runTurn({ prompt, resume = null, onProgress = null, timeoutMs = 30 * 60
     const env = { ...process.env, HOST_API: `http://127.0.0.1:${API_PORT}` };
     delete env.SLACK_BOT_TOKEN;
     delete env.SLACK_APP_TOKEN;
+    delete env.CLAUDE_CREDENTIALS_SEED; // holds OAuth tokens; the session never needs it
 
     const stdio = ['pipe', 'pipe', 'pipe'];
     const child = process.platform === 'win32'
-      ? spawn('cmd', ['/c', 'claude', ...args], { cwd: ROOT, windowsHide: true, env, stdio })
-      : spawn('claude', args, { cwd: ROOT, env, stdio });
+      ? spawn('cmd', ['/c', 'claude', ...args], { cwd: WORK_DIR, windowsHide: true, env, stdio })
+      : spawn('claude', args, { cwd: WORK_DIR, env, stdio });
     child.stdin.on('error', () => {});
     child.stdin.end(prompt);
 
@@ -598,7 +664,7 @@ async function handleInteraction(payload) {
 // restart. A broken file is reported once rather than crashing the host.
 let lastScheduleError = null;
 function loadSchedules() {
-  const file = join(ROOT, 'schedules.json');
+  const file = join(WORK_DIR, 'schedules.json');
   if (!existsSync(file)) return [];
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8'));
@@ -696,7 +762,7 @@ async function socketLoop() {
   log('socket closed');
 }
 
-log(`host up — model=${AGENT_MODEL} tz=${TIMEZONE} api=127.0.0.1:${API_PORT}${operator ? '' : ' (waiting for the claim code above)'}`);
+log(`host up — model=${AGENT_MODEL} tz=${TIMEZONE} api=127.0.0.1:${API_PORT} work=${WORK_DIR}${operator ? '' : ' (waiting for the claim code above)'}`);
 while (true) {
   try {
     await socketLoop();
