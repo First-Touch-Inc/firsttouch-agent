@@ -114,7 +114,7 @@ business. Good opening moves:
 - *"Watch our LinkedIn posts and draft follow-ups to everyone who engages."*
 - *"Customers are companies where `plan` isn't empty — never touch them."*
 
-It writes what it learns into [`CLAUDE.md`](CLAUDE.md) and its playbooks into
+It writes what it learns into `workspace/team.md` and its playbooks into
 `workspace/`, and schedules its own recurring runs in `schedules.json`. Ask it
 *"what do you know about us?"* or *"show me your outbound playbook"* any time —
 its memory is files in this repo, and all of it is yours to read and edit.

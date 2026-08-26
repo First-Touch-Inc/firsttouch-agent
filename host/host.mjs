@@ -54,13 +54,35 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORK_DIR = process.env.WORK_DIR ? resolve(ROOT, process.env.WORK_DIR) : ROOT;
 if (WORK_DIR !== ROOT) {
   mkdirSync(WORK_DIR, { recursive: true });
-  for (const entry of ['CLAUDE.md', 'workspace', 'schedules.example.json']) {
+
+  // One-time migration: CLAUDE.md used to be both rules and memory. If this
+  // volume's copy carries a learned "What I know about this team" tail and
+  // workspace/team.md doesn't exist yet, move the tail there BEFORE the
+  // seed/sync below — otherwise the sync would erase what the agent learned.
+  const oldClaudeMd = join(WORK_DIR, 'CLAUDE.md');
+  const teamMd = join(WORK_DIR, 'workspace', 'team.md');
+  if (existsSync(oldClaudeMd) && !existsSync(teamMd)) {
+    try {
+      const tail = readFileSync(oldClaudeMd, 'utf8').split(/^## What I know about this team\s*$/m)[1];
+      if (tail?.trim()) {
+        mkdirSync(dirname(teamMd), { recursive: true });
+        writeFileSync(teamMd, `# What I know about this team\n${tail.replace(/^@workspace\/team\.md\s*$/m, '')}`);
+        console.log('[host] migrated learned notes from CLAUDE.md into workspace/team.md');
+      }
+    } catch (e) {
+      console.error(`[host] could not migrate CLAUDE.md notes: ${e.message}`);
+    }
+  }
+
+  for (const entry of ['workspace', 'schedules.example.json']) {
     const src = join(ROOT, entry);
     if (!existsSync(src)) continue;
     cpSync(src, join(WORK_DIR, entry), { recursive: true, force: false, errorOnExist: false });
   }
-  // Rules, not memory: the guard and the MCP roster come from the image every
-  // boot. What the agent learns is its own; what it connects to is not.
+  // Rules, not memory: CLAUDE.md, the guard and the MCP roster come from the
+  // image every boot — updates ship without a migration ritual. What the
+  // agent learns is its own (workspace/, team.md); what it runs on is not.
+  cpSync(join(ROOT, 'CLAUDE.md'), join(WORK_DIR, 'CLAUDE.md'), { recursive: true, force: true });
   cpSync(join(ROOT, '.claude'), join(WORK_DIR, '.claude'), { recursive: true, force: true });
   cpSync(join(ROOT, '.mcp.json'), join(WORK_DIR, '.mcp.json'), { recursive: true, force: true });
   if (!existsSync(join(WORK_DIR, '.git'))) {
@@ -448,35 +470,64 @@ async function downloadImages(files) {
 const approvals = readState('approvals.json', {});
 const saveApprovals = () => writeState('approvals.json', approvals);
 
-async function postApprovalCard({ id, channel, title, text, task_ids = [] }) {
-  const body = toSlackMrkdwn(String(text)).slice(0, 2900);
+async function postApprovalCard({
+  id, channel, title, text,
+  copy = '', summary = '', sender = '', prospect = null, links = [], task_ids = [],
+}) {
+  const body = toSlackMrkdwn(String(text));
+  const clipped = body.length > 2000;
+  // Header: the prospect, when the agent says who it is — name · title @
+  // company with their photo — falling back to the plain title.
+  const headline = prospect?.name
+    ? `*${prospect.name}*${prospect.title ? ` · ${prospect.title}` : ''}${prospect.company ? ` @ ${prospect.company}` : ''}\n${title}`
+    : `*${title}*`;
+  const contextBits = [sender && `Sender: ${sender}`, summary].filter(Boolean).join('   ·   ');
+  const linkLine = (Array.isArray(links) ? links : []).filter((l) => l?.url)
+    .map((l) => `<${l.url}|${toSlackMrkdwn(String(l.text || 'link'))}>`).join('  ·  ');
+  const footer = [linkLine, task_ids.length ? `FirstTouch task${task_ids.length === 1 ? '' : 's'}: ${task_ids.join(', ')}` : '']
+    .filter(Boolean).join('   ·   ');
   const res = await slack('chat.postMessage', {
     channel,
     text: `Approval needed: ${title}`,
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `*${title}*\n${body}` } },
-      ...(task_ids.length ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: `FirstTouch task${task_ids.length === 1 ? '' : 's'}: ${task_ids.join(', ')}` }] }] : []),
+      {
+        type: 'section', text: { type: 'mrkdwn', text: headline.slice(0, 2900) },
+        ...(prospect?.image_url ? { accessory: { type: 'image', image_url: prospect.image_url, alt_text: prospect?.name || 'prospect' } } : {}),
+      },
+      ...(contextBits ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: contextBits.slice(0, 2900) }] }] : []),
+      { type: 'section', text: { type: 'mrkdwn', text: body.slice(0, 2000) + (clipped ? '\n_…full draft in this thread._' : '') } },
       {
         type: 'actions',
         elements: [
           { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Approve' }, action_id: 'approval:approve', value: id },
+          { type: 'button', text: { type: 'plain_text', text: 'Review / Edit' }, action_id: 'approval:edit', value: id },
           { type: 'button', style: 'danger', text: { type: 'plain_text', text: 'Deny' }, action_id: 'approval:deny', value: id },
         ],
       },
+      ...(footer ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: footer.slice(0, 2900) }] }] : []),
     ],
   });
   if (!res.ok) return { error: `Slack refused the card: ${res.error}` };
-  approvals[id] = { id, channel, ts: res.ts, title, task_ids, status: 'pending', created_at: new Date().toISOString() };
+  // Nothing is lost to the card's size cap: the full draft rides in the thread.
+  if (clipped) await say(channel, body, res.ts);
+  approvals[id] = {
+    id, channel, ts: res.ts, title, task_ids,
+    copy: String(copy || '').slice(0, 2900),
+    status: 'pending', created_at: new Date().toISOString(),
+  };
   saveApprovals();
   return { id, channel, ts: res.ts };
 }
 
-async function settleApproval(card, decision, user) {
+async function settleApproval(card, decision, user, editedCopy = null) {
   card.status = decision;
   card.decided_by = { id: user.id, name: user.name, email: user.email };
   card.decided_at = new Date().toISOString();
+  if (editedCopy != null) card.edited_copy = String(editedCopy);
   saveApprovals();
-  const verdict = decision === 'approved' ? `✅ Approved by ${user.name}` : `❌ Denied by ${user.name}`;
+  const verdict = decision !== 'approved' ? `❌ Denied by ${user.name}`
+    : editedCopy != null ? `✏️ Approved with edits by ${user.name}`
+    : `✅ Approved by ${user.name}`;
   await slack('chat.update', {
     channel: card.channel, ts: card.ts,
     text: `${verdict} — ${card.title}`,
@@ -489,7 +540,16 @@ async function settleApproval(card, decision, user) {
   // Wake the agent IN THE CARD'S THREAD with the outcome. The wake prompt is
   // self-contained: this may be a brand-new session with no memory of the
   // session that staged the card.
-  const prompt = decision === 'approved'
+  const prompt = decision === 'approved' && editedCopy != null
+    ? `[Slack approval event — a human clicked a button; this is not the operator typing.]\n` +
+      `${user.name}${user.email ? ` <${user.email}>` : ''} APPROVED the card "${card.title}" (id ${card.id}) WITH EDITED COPY. ` +
+      `Their version is final — use it EXACTLY as written between the markers below, no rewording. ` +
+      (card.task_ids.length
+        ? `Update the staged action(s) so the copy matches exactly (edit_task_action), verify the write with list_user_tasks/preview_task, and only then complete task${card.task_ids.length === 1 ? '' : 's'} ${card.task_ids.join(', ')} — the approval is recorded, so completing is permitted. `
+        : '') +
+      `An edit is the strongest feedback there is: work out the rule behind their diff and record it. Reply with one short confirmation line.\n` +
+      `---FINAL COPY START---\n${editedCopy}\n---FINAL COPY END---`
+    : decision === 'approved'
     ? `[Slack approval event — a human clicked a button; this is not the operator typing.]\n` +
       `${user.name}${user.email ? ` <${user.email}>` : ''} APPROVED the card "${card.title}" (id ${card.id}).` +
       (card.task_ids.length
@@ -523,6 +583,11 @@ const api = createServer(async (req, res) => {
       if (approvals[id]) return reply(409, { error: `approval "${id}" already exists` });
       return reply(200, await postApprovalCard({
         id, channel, title: String(title), text,
+        copy: typeof data.copy === 'string' ? data.copy : '',
+        summary: typeof data.summary === 'string' ? data.summary : '',
+        sender: typeof data.sender === 'string' ? data.sender : '',
+        prospect: data.prospect && typeof data.prospect === 'object' ? data.prospect : null,
+        links: Array.isArray(data.links) ? data.links : [],
         task_ids: Array.isArray(task_ids) ? task_ids.map(String) : [],
       }));
     }
@@ -666,9 +731,22 @@ async function handleEvent(ev) {
 
 // --- button clicks -----------------------------------------------------------
 async function handleInteraction(payload) {
+  // Modal submit: the human edited the copy and clicked "Approve with edits".
+  // Their text is final — the wake-up tells the agent to write it back
+  // verbatim, verify, and only then complete.
+  if (payload?.type === 'view_submission' && payload.view?.callback_id === 'approval_edit') {
+    const card = approvals[payload.view.private_metadata];
+    if (!card || card.status !== 'pending') return;
+    const user = await whoIs(payload.user?.id);
+    const edited = payload.view.state?.values?.copy?.copy_input?.value || '';
+    if (!edited.trim()) return;
+    log(`approval ${card.id} approved WITH EDITS by ${user.name}`);
+    await settleApproval(card, 'approved', user, edited);
+    return;
+  }
   if (payload?.type !== 'block_actions') return;
   const action = (payload.actions || [])[0];
-  if (!action || !/^approval:(approve|deny)$/.test(action.action_id)) return;
+  if (!action || !/^approval:(approve|deny|edit)$/.test(action.action_id)) return;
   const card = approvals[action.value];
   if (!card) return;
   const user = await whoIs(payload.user?.id);
@@ -679,6 +757,32 @@ async function handleInteraction(payload) {
       channel: card.channel, user: user.id,
       text: `Already ${card.status} by ${card.decided_by?.name ?? 'someone'}.`,
     }).catch(() => {});
+    return;
+  }
+  if (action.action_id === 'approval:edit') {
+    // Open the edit modal prefilled with the draft copy. Submitting approves;
+    // closing changes nothing — the card stays pending.
+    const r = await slack('views.open', {
+      trigger_id: payload.trigger_id,
+      view: {
+        type: 'modal', callback_id: 'approval_edit', private_metadata: card.id,
+        title: { type: 'plain_text', text: 'Review / Edit' },
+        submit: { type: 'plain_text', text: 'Approve with edits' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: `*${card.title}*\nYour version below is what gets staged and sent — exactly as written.`.slice(0, 2900) } },
+          {
+            type: 'input', block_id: 'copy',
+            label: { type: 'plain_text', text: 'Final copy' },
+            element: {
+              type: 'plain_text_input', action_id: 'copy_input', multiline: true,
+              ...(card.copy ? { initial_value: card.copy } : {}),
+            },
+          },
+        ],
+      },
+    });
+    if (!r.ok) log(`views.open failed for ${card.id}: ${r.error}`);
     return;
   }
   const decision = action.action_id.endsWith('approve') ? 'approved' : 'denied';
