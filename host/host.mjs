@@ -154,6 +154,21 @@ async function slack(method, body) {
   return json;
 }
 
+// Slack's READ methods (users.info & co) do not accept application/json
+// bodies: Slack ignores the body entirely and reports the missing argument as
+// the resource being absent — users.info with a JSON body answers
+// "user_not_found" for a user who exists. Write methods accept JSON, which is
+// why everything else works. Reads therefore go as GET with query params.
+async function slackGet(method, params) {
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`https://slack.com/api/${method}?${qs}`, {
+    headers: { Authorization: `Bearer ${BOT_TOKEN}` },
+  });
+  const json = await res.json().catch(() => ({ ok: false, error: 'bad json' }));
+  if (!json.ok) log(`slack ${method} failed: ${json.error}`);
+  return json;
+}
+
 // Long answers are split at paragraph boundaries, not truncated — an agent
 // explaining what it built should not lose the second half of the explanation.
 const CHUNK = 3800;
@@ -194,7 +209,7 @@ const userCache = new Map();
 async function whoIs(userId) {
   if (!userId) return null;
   if (userCache.has(userId)) return userCache.get(userId);
-  const r = await slack('users.info', { user: userId });
+  const r = await slackGet('users.info', { user: userId });
   const u = r.ok ? {
     id: userId,
     name: r.user?.profile?.real_name || r.user?.real_name || r.user?.name || userId,
