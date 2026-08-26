@@ -92,7 +92,9 @@ once on your machine (step 3), then:
 npm run seed
 ```
 and set the printed value as `CLAUDE_CREDENTIALS_SEED` on the service — the
-host hydrates it on first boot. The same works anywhere Docker runs:
+host hydrates it on first boot. The script exports only this repo's MCP
+grants: your claude.ai login and any other servers' grants deliberately stay
+on your machine. The same works anywhere Docker runs:
 ```bash
 docker build -t firsttouch-agent . && docker run -d --restart unless-stopped \
   --env-file .env -v agent-data:/data firsttouch-agent

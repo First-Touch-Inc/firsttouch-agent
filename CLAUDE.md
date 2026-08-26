@@ -30,7 +30,7 @@ that file is never touched by an update.
   for you:
   `curl -s -X POST $HOST_API/slack/post -d '{"channel":"C…","text":"…","thread_ts":"optional"}'`
   `curl -s -X POST $HOST_API/slack/approval -d '{…}'` with:
-  `channel`, `title`, `task_ids`, `sender` ("Jared Mintzlaff — LinkedIn"),
+  `channel`, `title`, `task_ids`, `sender` (the requester, e.g. "Sam Lee — LinkedIn"),
   `prospect` ({name,title,company,image_url} — `image_url` is expected, not
   optional: FirstTouch contact data and enrichment carry the LinkedIn profile
   photo URL; fetch it and pass it, omit only when it truly doesn't exist),
