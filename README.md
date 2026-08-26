@@ -137,10 +137,11 @@ every MCP tool call in every session, scheduled or interactive, and denies:
 | `add_dynamic_action` without `isHumanApprovalRequired: true` | would send on creation |
 | `add_dynamic_action` without owner **and** assignee | approving would send from the wrong person's mailbox, irreversibly |
 | `complete_task` without a recorded human Approve click | the agent never approves its own work — the host records each click (Slack-authenticated identity) and the hook permits completing exactly those task ids |
-| Creating/editing/publishing flows | flow copy sends automatically, so a human authors it |
+| Publishing a flow without a recorded Approve click | live flow copy sends automatically to everyone enrolled — the agent drafts the flow, the card shows every step, a human makes it live |
 
-Flow *enrollment* is allowed (published flows carry human-written copy); create
-`approved-flows.txt` (one flow id per line) to restrict which ones.
+Flow *drafting* is open (a draft sends nothing) and *enrollment* into
+published flows is allowed; create `approved-flows.txt` (one flow id per
+line) to restrict which ones.
 
 The hook keys off bare tool names, so renamed or UUID-namespaced connectors
 can't slip past it. It fails closed on anything it can't parse. Tests in

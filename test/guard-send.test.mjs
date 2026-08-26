@@ -164,12 +164,43 @@ test('skipping and cancelling stay allowed — both are the safe direction', () 
   assert.equal(decide('mcp__firsttouch__remove_dynamic_action_prospect', {}), null);
 });
 
-// --- flows: enroll yes, author no ---------------------------------------------
+// --- flows: author drafts freely; publishing needs a human click ---------------
 
-test('authoring or publishing a flow is blocked', () => {
-  for (const tool of ['create_flow_plan', 'update_flow_plan', 'replace_flow_root', 'manage_flow_publication']) {
-    assert.ok(denied(decide(`mcp__firsttouch__${tool}`, {})), `${tool} must be blocked`);
-  }
+test('authoring flow drafts is allowed; publishing in the same breath is not', () => {
+  assert.equal(decide('mcp__firsttouch__create_flow_plan', { name: 'x', publish: false }), null);
+  assert.equal(decide('mcp__firsttouch__create_flow_plan', { name: 'x' }), null);
+  assert.equal(decide('mcp__firsttouch__update_flow_plan', { flowPlanId: 'f1' }), null);
+  assert.equal(decide('mcp__firsttouch__replace_flow_root', { flowPlanId: 'f1' }), null);
+  const d = decide('mcp__firsttouch__create_flow_plan', { name: 'x', publish: true });
+  assert.ok(denied(d));
+  assert.match(d.permissionDecisionReason, /DRAFT/);
+});
+
+test('publishing requires a recorded human approval for that exact flow id', () => {
+  withApprovals({}, () => {
+    const d = decide('mcp__firsttouch__manage_flow_publication', { flowPlanId: 'f1', action: 'publish' });
+    assert.ok(denied(d));
+    assert.match(d.permissionDecisionReason, /no human has approved/i);
+  });
+  withApprovals({ card1: { status: 'approved', task_ids: ['f1'] } }, () => {
+    assert.equal(decide('mcp__firsttouch__manage_flow_publication', { flowPlanId: 'f1', action: 'publish' }), null);
+    assert.ok(denied(decide('mcp__firsttouch__manage_flow_publication', { flowPlanId: 'f2', action: 'publish' })),
+      'approval of one flow must not smear onto another');
+  });
+  withApprovals({ p: { status: 'pending', task_ids: ['f1'] } }, () => {
+    assert.ok(denied(decide('mcp__firsttouch__manage_flow_publication', { flowPlanId: 'f1', action: 'publish' })),
+      'a pending card publishes nothing');
+  });
+});
+
+test('publish without a flow id cannot be checked — blocked', () => {
+  withApprovals({ c: { status: 'approved', task_ids: ['f1'] } }, () => {
+    assert.ok(denied(decide('mcp__firsttouch__manage_flow_publication', { action: 'publish' })));
+  });
+});
+
+test('unpublishing stays allowed — the safe direction', () => {
+  assert.equal(decide('mcp__firsttouch__manage_flow_publication', { flowPlanId: 'f1', action: 'unpublish' }), null);
 });
 
 const FLOWS_FILE = join(ROOT, 'approved-flows.txt');

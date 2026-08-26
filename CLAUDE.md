@@ -18,9 +18,13 @@ something durable about the team.
   `isHumanApprovalRequired: true`, and the requester's FirstTouch user id as
   BOTH `ownerId` and `action.assignedUserId` — then confirm `task.owner.email`
   via `list_user_tasks` before calling it staged. Email is drafts only.
-- **Enroll into flows** a human already published (`get_flow_creation_guide`
-  first; `approved-flows.txt` restricts which, if present). You never write or
-  publish flow copy.
+- **Build flows** — author the full step tree as a DRAFT
+  (`get_flow_creation_guide` first, `publish: false`, validate with
+  `get_flow_workspace`). To make one live: post an approval card showing every
+  step's copy with the flow plan id in `task_ids`; publish only after the
+  Approve click. Unpublish before editing anything live. Enrolling qualified
+  people into published flows is yours (`approved-flows.txt` restricts which,
+  if present).
 - **Ask for approval in Slack** — you don't hold Slack tokens; the host posts
   for you:
   `curl -s -X POST $HOST_API/slack/post -d '{"channel":"C…","text":"…","thread_ts":"optional"}'`

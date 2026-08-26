@@ -22,8 +22,9 @@
 //   3. Creating an outreach action without human approval required.
 //   4. Creating an outreach action without an explicit owner.
 //   5. Completing an approval task — approving is the human's half.
-//   6. Authoring or publishing flows — flow copy sends automatically, so a
-//      human writes and publishes it; the agent only enrolls into it.
+//   6. PUBLISHING a flow without a recorded human approval — authoring and
+//      editing drafts is normal agent work (drafts send nothing); making copy
+//      live is the human's click, same record as task completion.
 //
 // Connector tools arrive as mcp__<server-or-uuid>__<tool>, so every check keys
 // off the BARE TOOL NAME after the prefix — a rename or a UUID-namespaced
@@ -138,18 +139,25 @@ if (/^add_dynamic_action$/i.test(bare)) {
 // into effect by itself: it would have to fabricate a record, and the host
 // overwrites the file from its own state on every decision. Skipping and
 // cancelling stay allowed — both are the safe direction.
-if (/^complete_task$/i.test(bare)) {
+// Recorded human approvals — the file the host writes when a button is
+// clicked, and the single source every approval-shaped gate reads: task
+// completion and flow publication alike.
+function approvedIds() {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = resolve(here, '..', '..');
   const stateDir = process.env.STATE_DIR ? resolve(root, process.env.STATE_DIR) : join(root, 'state');
-  let approved = new Set();
+  const approved = new Set();
   try {
     const records = JSON.parse(readFileSync(join(stateDir, 'approvals.json'), 'utf8'));
     for (const card of Object.values(records)) {
       if (card?.status === 'approved') for (const t of card.task_ids ?? []) approved.add(String(t));
     }
   } catch { /* no records → nothing is approved */ }
+  return approved;
+}
 
+if (/^complete_task$/i.test(bare)) {
+  const approved = approvedIds();
   const referenced = [...flat.matchAll(/"(?:task_?ids?|taskIds)"\s*:\s*(?:"([^"]+)"|\[([^\]]*)\])/gi)]
     .flatMap((m) => m[1] ? [m[1]] : String(m[2] ?? '').split(',').map((s) => s.replace(/["\s]/g, '')).filter(Boolean));
   if (referenced.length === 0) {
@@ -170,18 +178,43 @@ if (/^complete_task$/i.test(bare)) {
   allow(); // every referenced task carries a recorded human approval
 }
 
-// --- 6. Flows: enroll yes, author no ------------------------------------------
-// A flow's copy sends automatically once published, so writing or publishing
-// one is authoring outreach nobody will review per-send. A human does that.
-// Enrolling a qualified person into an already-published flow is the agent's
-// job — the copy in it was written and published by a human.
-const FLOW_AUTHORING = /^(create_flow_plan|update_flow_plan|replace_flow_root|manage_flow_publication)$/i;
-if (FLOW_AUTHORING.test(bare)) {
+// --- 6. Flows: author drafts freely; PUBLISHING needs a human click ----------
+// A flow's copy sends automatically to everyone enrolled once it is live, so
+// the gate sits exactly on the moment copy can go live — not on authoring.
+// Drafting, editing and validating flow plans is normal agent work. Publish
+// is permitted only for a flow plan id a recorded human approval covers — the
+// same state/approvals.json record complete_task uses. The card must show
+// every step's copy, with the flow plan id in task_ids.
+if (/^create_flow_plan$/i.test(bare) && /"publish"\s*:\s*true/i.test(flat)) {
   deny(
-    `Blocked by the send guard: "${bare}" creates or publishes a flow. The agent ` +
-    `decides WHO belongs in a flow, never what a flow says or whether it goes live. ` +
-    `Ask a human to author and publish it, then enroll into it.`,
+    `Blocked by the send guard: create_flow_plan with publish: true would put flow copy ` +
+    `live with no human review. Create the flow as a DRAFT (publish: false), post an ` +
+    `approval card containing every step's copy with the flow plan id in task_ids, and ` +
+    `publish only after the Approve click.`,
   );
+}
+if (/^manage_flow_publication$/i.test(bare)) {
+  const action = (flat.match(/"action"\s*:\s*"([^"]+)"/i)?.[1] || '').toLowerCase();
+  if (action === 'publish' || action === 'republish') {
+    const approved = approvedIds();
+    const referenced = [...flat.matchAll(/"(?:flow_?plan_?id|flowPlanId|flowId|flow_id|id)"\s*:\s*"([^"]+)"/gi)].map((m) => m[1]);
+    if (referenced.length === 0) {
+      deny(
+        `Blocked by the send guard: publish was requested without a recognizable flow plan ` +
+        `id, so it cannot be checked against recorded approvals. Pass the flow plan id explicitly.`,
+      );
+    }
+    const unapproved = referenced.filter((id) => !approved.has(String(id)));
+    if (unapproved.length) {
+      deny(
+        `Blocked by the send guard: no human has approved publishing flow ${unapproved.join(', ')}. ` +
+        `Publishing puts copy live, so a human makes that call: post an approval card showing ` +
+        `every step's copy with the flow plan id in task_ids (POST $HOST_API/slack/approval), ` +
+        `wait for the Approve click, then publish. Never ask anyone to work around this.`,
+      );
+    }
+  }
+  allow(); // unpublish / pause / non-publish actions are the safe direction
 }
 
 // Optional tightening: if approved-flows.txt exists at the repo root (one flow
