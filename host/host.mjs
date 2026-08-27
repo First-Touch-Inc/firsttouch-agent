@@ -404,9 +404,19 @@ async function pump() {
   running = true;
   const job = queue.shift();
   currentTurnKey = job.key || null;
-  try { job.resolveJob(await runTurn(job)); }
-  catch (e) { job.resolveJob({ error: e.message }); }
-  finally { running = false; currentTurnKey = null; pump(); }
+  // One line in, one line out: "is it hung?" should be answerable from the
+  // logs in a glance, the way a terminal user just… sees their session.
+  const t0 = Date.now();
+  const tag = job.preemptible ? 'reconcile' : (job.key || 'turn');
+  log(`job start [${tag}] model=${job.model || AGENT_MODEL} resume=${job.resume ? 'yes' : 'fresh'} queued=${queue.length}`);
+  try {
+    const res = await runTurn(job);
+    log(`job ${res.error ? `FAILED [${tag}] ${String(res.error).replace(/\s+/g, ' ').slice(0, 160)}` : `done [${tag}]`} in ${Math.round((Date.now() - t0) / 1000)}s`);
+    job.resolveJob(res);
+  } catch (e) {
+    log(`job CRASHED [${tag}] ${e.message} in ${Math.round((Date.now() - t0) / 1000)}s`);
+    job.resolveJob({ error: e.message });
+  } finally { running = false; currentTurnKey = null; pump(); }
 }
 
 /**
